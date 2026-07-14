@@ -10,14 +10,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from config.models import N_BATCHES, SIZES  # noqa: E402
+from config.data_bundle import EVAL_SEEDS, EVAL_SIZES  # noqa: E402
 from config.paths import DATA_ROOT  # noqa: E402
-from src import subsample  # noqa: E402
-from src.assays import assay_csv, load_assay_meta  # noqa: E402
+from src.assays import load_assay_meta  # noqa: E402
 
-DEFAULT_SIZES = SIZES
-DEFAULT_BATCHES = list(range(1, N_BATCHES + 1))
-DEFAULT_STRATA = 10
+DEFAULT_SIZES = list(EVAL_SIZES)
+DEFAULT_BATCHES = list(EVAL_SEEDS)
 SPLITS = DATA_ROOT / "splits"
 
 
@@ -55,19 +53,12 @@ def verify(args: argparse.Namespace) -> int:
     bad_meta = []
     bad_labels = []
     duplicates = []
-    deterministic_mismatches = []
-    missing_sources = []
-    source_checked = 0
     checked = 0
 
     for assay in assays:
         if assay not in meta:
             bad_meta.append((assay, "assay missing from metadata"))
             continue
-        source_path = assay_csv(assay)
-        rows = subsample.load_variants(source_path) if source_path.exists() else None
-        if rows is None:
-            missing_sources.append(assay)
         for size in sizes:
             for batch in batches:
                 split_path = SPLITS / assay / f"n{size}_b{batch}.json"
@@ -117,37 +108,21 @@ def verify(args: argparse.Namespace) -> int:
                         )
                     )
 
-                if rows is not None:
-                    expected = subsample.stratified_sample(rows, size, args.strata, seed=batch)
-                    expected_variants = [
-                        {"id": variant, "seq": sequence} for variant, sequence, _ in expected
-                    ]
-                    expected_labels = {variant: score for variant, _, score in expected}
-                    if variants != expected_variants or labels != expected_labels:
-                        deterministic_mismatches.append((assay, size, batch))
-                    source_checked += 1
-
                 checked += 1
 
     warnings = check_manifest(assays, sizes)
-    hard_errors = missing + bad_meta + bad_labels + duplicates + deterministic_mismatches
-    if args.require_source:
-        hard_errors += missing_sources
+    hard_errors = missing + bad_meta + bad_labels + duplicates
 
     print(f"assays {len(assays)}")
     print(f"sizes {sizes}")
     print(f"batches {batches}")
-    print(f"strata {args.strata}")
     print(f"split_files {sum(1 for p in SPLITS.rglob('*') if p.is_file())}")
     print(f"expected_files_including_manifest {len(assays) * len(sizes) * len(batches) * 2 + 1}")
     print(f"checked_cells {checked}")
-    print(f"source_recomputed_cells {source_checked}")
-    print(f"assays_without_raw_source {len(missing_sources)}")
     print(f"missing {len(missing)}")
     print(f"bad_meta {len(bad_meta)}")
     print(f"bad_labels {len(bad_labels)}")
     print(f"duplicate_variant_cells {len(duplicates)}")
-    print(f"deterministic_mismatches {len(deterministic_mismatches)}")
 
     for warning in warnings:
         print(f"WARNING {warning}")
@@ -173,14 +148,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--assays", nargs="*")
     parser.add_argument("--sizes", nargs="*", type=int, default=DEFAULT_SIZES)
-    parser.add_argument("--batches", nargs="*", type=int, default=DEFAULT_BATCHES)
-    parser.add_argument("--strata", type=int, default=DEFAULT_STRATA)
-    parser.add_argument("--strict-manifest", action="store_true")
     parser.add_argument(
-        "--require-source",
-        action="store_true",
-        help="also require raw DMS tables and recompute every deterministic split",
+        "--seeds", "--batches", dest="batches", nargs="*", type=int, default=DEFAULT_BATCHES
     )
+    parser.add_argument("--strict-manifest", action="store_true")
     parser.add_argument(
         "--sha-samples",
         nargs="*",

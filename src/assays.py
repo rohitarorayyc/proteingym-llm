@@ -10,7 +10,6 @@ from pathlib import Path
 from config.paths import DATA_ROOT
 
 ROOT = Path(__file__).resolve().parents[1]
-DMS_DIR = DATA_ROOT / "DMS"
 SPLITS_DIR = DATA_ROOT / "splits"
 REFERENCE = DATA_ROOT / "reference" / "DMS_substitutions.csv"
 PROMPT_REPAIRS = ROOT / "config" / "assay_prompt_repairs_v1.json"
@@ -55,11 +54,6 @@ def apply_prompt_repair(assay_id: str, source_description: str) -> tuple[str, st
 
 
 @lru_cache(maxsize=1)
-def _csv_map() -> dict[str, Path]:
-    return {path.stem: path for path in DMS_DIR.rglob("*.csv")} if DMS_DIR.exists() else {}
-
-
-@lru_cache(maxsize=1)
 def _runnable_assays() -> set[str]:
     split_manifest = SPLITS_DIR / "manifest.csv"
     if split_manifest.is_file():
@@ -69,19 +63,16 @@ def _runnable_assays() -> set[str]:
                 for row in csv.DictReader(handle)
                 if (row.get("assay") or "").strip()
             }
-    assays = set(_csv_map())
-    if SPLITS_DIR.exists():
-        assays.update(path.name for path in SPLITS_DIR.iterdir() if path.is_dir())
-    return assays
-
-
-def assay_csv(assay_id: str) -> Path:
-    return _csv_map().get(assay_id, DMS_DIR / f"{assay_id}.csv")
+    return (
+        {path.name for path in SPLITS_DIR.iterdir() if path.is_dir()}
+        if SPLITS_DIR.exists()
+        else set()
+    )
 
 
 @lru_cache(maxsize=1)
 def load_assay_meta() -> dict[str, dict]:
-    """Load metadata for assays backed by a DMS table or a frozen split."""
+    """Load metadata for assays in the frozen evaluation split."""
     if not REFERENCE.exists():
         return {}
 

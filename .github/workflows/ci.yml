@@ -35,8 +35,6 @@ jobs:
           cd "${RUNNER_TEMP}"
           "${RUNNER_TEMP}/wheeltest/bin/pgllm-data" --help
           "${RUNNER_TEMP}/wheeltest/bin/pgllm-run" --help
-          "${RUNNER_TEMP}/wheeltest/bin/pgllm-batch" --help
           "${RUNNER_TEMP}/wheeltest/bin/pgllm-score" --help
-          "${RUNNER_TEMP}/wheeltest/bin/pgllm-baselines" --help
           "${RUNNER_TEMP}/wheeltest/bin/pgllm-models" --help
           "${RUNNER_TEMP}/wheeltest/bin/pgllm-verify-splits" --help

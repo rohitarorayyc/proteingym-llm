@@ -5,6 +5,7 @@ import io
 import json
 import tarfile
 from pathlib import Path
+from urllib.request import Request
 
 import pytest
 
@@ -18,6 +19,8 @@ from config.data_bundle import (
 from scripts.package_eval_bundle import build_eval_bundle
 from src.data_bundle import (
     BundleError,
+    _download_headers,
+    _SafeRedirectHandler,
     _select_release_asset_api,
     bundle_identity,
     install_bundle,
@@ -135,6 +138,33 @@ def test_release_asset_resolution_is_exact_and_uses_only_the_api_url():
     assert _select_release_asset_api(release, "bundle.tar.gz").endswith("/123")
     with pytest.raises(BundleError, match="exactly one asset"):
         _select_release_asset_api(release, "missing.tar.gz")
+
+
+def test_github_token_is_never_sent_to_arbitrary_download_url(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "sensitive-test-token")
+    assert "Authorization" not in _download_headers(
+        "https://downloads.example.org/eval.tar.gz", binary=True
+    )
+    trusted = _download_headers(
+        "https://api.github.com/repos/rohitarorayyc/proteingym-llm/releases/assets/123",
+        binary=True,
+    )
+    assert trusted["Authorization"] == "Bearer sensitive-test-token"
+
+    request = Request(
+        "https://api.github.com/repos/rohitarorayyc/proteingym-llm/releases/assets/123",
+        headers=trusted,
+    )
+    redirected = _SafeRedirectHandler().redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://release-assets.githubusercontent.com/archive.tar.gz",
+    )
+    assert redirected is not None
+    assert redirected.get_header("Authorization") is None
 
 
 def test_default_pin_rejects_custom_manifest(tmp_path: Path):

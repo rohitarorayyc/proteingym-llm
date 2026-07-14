@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from src import analyze, prompt
+from src import analyze, client, prompt
 from src.run import (
     base_result_record,
     condition_key,
@@ -14,12 +14,30 @@ from src.run import (
 )
 
 SPEC = {
-    "provider": "openai",
+    "provider": "openai-compatible",
+    "api_style": "responses",
     "model_id": "test-model",
+    "api_key_env": "LAB_API_KEY",
+    "base_url_env": "LAB_BASE_URL",
     "reasoning": "max",
+    "send_reasoning": True,
     "max_tokens": 128000,
     "ctx": 1000000,
 }
+
+
+@pytest.fixture(autouse=True)
+def _endpoint_environment(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "_env",
+        lambda: {
+            "LAB_API_KEY": "test-key",
+            "LAB_BASE_URL": "https://inference.test/v1",
+        },
+    )
+
+
 META = {
     "reference_sequence": "WT",
     "fitness_description": "measured activity",
@@ -57,13 +75,16 @@ def _write_one_cell(root, *, batch=1, tamper_split=False):
         META,
         user,
         len(ids),
-        via="live",
         data_bundle=DATA_BUNDLE,
         subset=SUBSET,
     )
     record_response(
         record,
-        {"text": '{"ranking":["M01","M02"]}', "status": "completed"},
+        {
+            "text": '{"ranking":["M01","M02"]}',
+            "status": "completed",
+            "response_model_id": "test-model-20260714",
+        },
         ids,
         SUBSET,
     )
@@ -92,6 +113,34 @@ def test_analysis_recomputes_and_rejects_episode_hashes(tmp_path, monkeypatch):
     root = tmp_path / "results"
     _write_one_cell(root, tamper_split=True)
     _patch_analysis(monkeypatch, root)
+    with pytest.raises(SystemExit, match="provenance-incompatible"):
+        analyze.main()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["spearman", "ranking", "ranking_and_score", "response_model_id", "overflow"],
+)
+def test_analysis_recomputes_scores_and_requires_backend_identity(tmp_path, monkeypatch, field):
+    root = tmp_path / "results"
+    for batch in (1, 2, 3):
+        _write_one_cell(root, batch=batch)
+    path = root / "test" / "n50" / "b1" / "assay.json"
+    record = json.loads(path.read_text())
+    if field == "spearman":
+        record[field] = -record[field]
+    elif field == "ranking":
+        record[field] = list(reversed(record[field]))
+    elif field == "ranking_and_score":
+        record["ranking"] = list(reversed(record["ranking"]))
+        record["spearman"] = -record["spearman"]
+    elif field == "response_model_id":
+        record[field] = None
+    else:
+        record[field] = True
+    path.write_text(json.dumps(record))
+    _patch_analysis(monkeypatch, root)
+
     with pytest.raises(SystemExit, match="provenance-incompatible"):
         analyze.main()
 

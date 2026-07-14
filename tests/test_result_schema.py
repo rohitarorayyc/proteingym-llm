@@ -1,5 +1,4 @@
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -14,12 +13,30 @@ from src.run import (
 )
 
 SPEC = {
-    "provider": "openai",
+    "provider": "openai-compatible",
+    "api_style": "responses",
     "model_id": "test-model",
+    "api_key_env": "LAB_API_KEY",
+    "base_url_env": "LAB_BASE_URL",
     "reasoning": "max",
+    "send_reasoning": True,
     "max_tokens": 128000,
     "ctx": 1000000,
 }
+
+
+@pytest.fixture(autouse=True)
+def _endpoint_environment(monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "_env",
+        lambda: {
+            "LAB_API_KEY": "test-key",
+            "LAB_BASE_URL": "https://inference.test/v1",
+        },
+    )
+
+
 META = {
     "reference_sequence": "WT",
     "fitness_description": "repaired description",
@@ -41,31 +58,6 @@ def test_prompt_token_planning_uses_frozen_tokenizer_or_safe_utf8_bound():
     assert 0 < client.estimate_tokens(text, tokenized) < len(text.encode("utf-8"))
 
 
-def test_provider_normalizers_preserve_returned_model_identity():
-    anthropic = client.normalize_anthropic_message(
-        SimpleNamespace(
-            id="msg_1",
-            model="claude-backend-20260714",
-            created_at="2026-07-14T12:00:00Z",
-            content=[SimpleNamespace(type="text", text="OK")],
-            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
-            stop_reason="end_turn",
-            stop_sequence=None,
-        )
-    )
-    assert anthropic["response_model_id"] == "claude-backend-20260714"
-
-    google = client.normalize_google_payload(
-        {
-            "modelVersion": "gemini-backend-20260714",
-            "createTime": "2026-07-14T12:00:00Z",
-            "candidates": [{"content": {"parts": [{"text": "OK"}]}}],
-        }
-    )
-    assert google["response_model_id"] == "gemini-backend-20260714"
-    assert google["provider_response_version"] == "gemini-backend-20260714"
-
-
 def test_result_schema_preserves_full_provider_metadata(tmp_path):
     raw = "reasoning and answer " * 1000
     ids = ["M01", "M02"]
@@ -79,7 +71,6 @@ def test_result_schema_preserves_full_provider_metadata(tmp_path):
         META,
         "prompt",
         2,
-        via="live",
         data_bundle=DATA_BUNDLE,
         subset=subset,
     )
@@ -144,6 +135,28 @@ def test_resume_rejects_mixed_provenance(tmp_path):
         should_run(output, expected=expected)
 
 
+def test_resume_rejects_tampered_cell_identity(tmp_path):
+    subset = [("v1", "A", 1.0), ("v2", "B", 0.0)]
+    expected = base_result_record(
+        "test",
+        SPEC,
+        50,
+        1,
+        "assay",
+        META,
+        "prompt",
+        2,
+        data_bundle=DATA_BUNDLE,
+        subset=subset,
+    )
+    tampered = dict(expected, model="other-model", batch=2)
+    output = tmp_path / "result.json"
+    output.write_text(json.dumps(tampered), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="model, batch"):
+        should_run(output, expected=expected)
+
+
 def test_truncated_response_is_preserved_but_not_scored():
     subset = [("v1", "A", 1.0), ("v2", "B", 0.0)]
     record = base_result_record(
@@ -155,7 +168,6 @@ def test_truncated_response_is_preserved_but_not_scored():
         META,
         "prompt",
         2,
-        via="live",
         data_bundle=DATA_BUNDLE,
         subset=subset,
     )
@@ -171,6 +183,104 @@ def test_truncated_response_is_preserved_but_not_scored():
     assert record["truncated"] is True
     assert record["parsed"] is False
     assert record["spearman"] is None
+
+
+def test_complete_response_without_provider_model_identity_is_not_scorable():
+    subset = [("v1", "A", 1.0), ("v2", "B", 0.0)]
+    record = base_result_record(
+        "test",
+        SPEC,
+        50,
+        1,
+        "assay",
+        META,
+        "prompt",
+        2,
+        data_bundle=DATA_BUNDLE,
+        subset=subset,
+    )
+    record_response(
+        record,
+        {"text": '{"ranking":["M01","M02"]}', "status": "completed"},
+        ["M01", "M02"],
+        subset,
+    )
+    assert record["error"] == "provider response missing model identity"
+    assert record["parsed"] is False
+    assert record["spearman"] is None
+
+
+@pytest.mark.parametrize(
+    ("response_fields", "message"),
+    [
+        ({"status": "failed"}, "status is not successful: failed"),
+        ({"status": "cancelled"}, "status is not successful: cancelled"),
+        ({"status": "completed", "stop_reason": "SAFETY"}, "stop reason"),
+        ({"status": "completed", "stop_reason": "content_filter"}, "stop reason"),
+    ],
+)
+def test_terminal_provider_failures_are_preserved_but_not_scored(response_fields, message):
+    subset = [("v1", "A", 1.0), ("v2", "B", 0.0)]
+    record = base_result_record(
+        "test",
+        SPEC,
+        50,
+        1,
+        "assay",
+        META,
+        "prompt",
+        2,
+        data_bundle=DATA_BUNDLE,
+        subset=subset,
+    )
+    response = {
+        "text": '{"ranking":["M01","M02"]}',
+        "response_model_id": "test-model-2026-07-14",
+        **response_fields,
+    }
+    record_response(record, response, ["M01", "M02"], subset)
+    assert message in record["error"]
+    assert record["raw_output"] == response["text"]
+    assert record["truncated"] is False
+    assert record["parsed"] is False
+    assert record["spearman"] is None
+
+
+@pytest.mark.parametrize(
+    "response_fields",
+    [
+        {"status": "completed", "stop_reason": "STOP"},
+        {"stop_reason": "end_turn"},
+        {"stop_reason": "stop_sequence"},
+    ],
+)
+def test_normal_provider_stop_reasons_remain_scorable(response_fields):
+    subset = [("v1", "A", 1.0), ("v2", "B", 0.0)]
+    record = base_result_record(
+        "test",
+        SPEC,
+        50,
+        1,
+        "assay",
+        META,
+        "prompt",
+        2,
+        data_bundle=DATA_BUNDLE,
+        subset=subset,
+    )
+    record_response(
+        record,
+        {
+            "text": '{"ranking":["M01","M02"]}',
+            "response_model_id": "test-model-2026-07-14",
+            **response_fields,
+        },
+        ["M01", "M02"],
+        subset,
+    )
+    assert record["error"] is None
+    assert record["parsed"] is True
+    assert record["spearman"] == pytest.approx(1.0)
 
 
 def test_live_truncation_stays_outside_final_results(tmp_path, monkeypatch):

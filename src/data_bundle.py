@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
+from urllib.parse import urlsplit
 
 from config.data_bundle import (
     EVAL_BUNDLE_FILENAME,
@@ -40,6 +41,8 @@ DEFAULT_DATA_ROOT = DATA_ROOT
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 DOWNLOAD_CHUNK_SIZE = 1 << 20
 GITHUB_RELEASE_TAG_PATH = "/releases/tags/"
+GITHUB_API_HOST = "api.github.com"
+GITHUB_REPOSITORY_API_PREFIX = "/repos/rohitarorayyc/proteingym-llm/"
 
 
 class BundleError(RuntimeError):
@@ -113,23 +116,54 @@ def _select_release_asset_api(release: dict, filename: str) -> str:
     return api_url
 
 
-def _github_headers(*, binary: bool) -> dict[str, str]:
+def _is_trusted_github_api_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname == GITHUB_API_HOST
+        and port in {None, 443}
+        and parsed.path.startswith(GITHUB_REPOSITORY_API_PREFIX)
+    )
+
+
+def _download_headers(url: str, *, binary: bool) -> dict[str, str]:
     headers = {
         "User-Agent": "proteingym-llm/1.0",
         "Accept": "application/octet-stream" if binary else "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     github_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if github_token:
+    if github_token and _is_trusted_github_api_url(url):
         headers["Authorization"] = f"Bearer {github_token}"
     return headers
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward authorization when an HTTP redirect changes origin."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(request, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            old = urlsplit(request.full_url)
+            new = urlsplit(newurl)
+            if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+                redirected.remove_header("Authorization")
+        return redirected
+
+
+def _open_url(request: urllib.request.Request, timeout: int):
+    return urllib.request.build_opener(_SafeRedirectHandler()).open(request, timeout=timeout)
+
+
 def _resolve_bundle_url(url: str, timeout: int) -> str:
-    if GITHUB_RELEASE_TAG_PATH not in url:
+    if GITHUB_RELEASE_TAG_PATH not in url or not _is_trusted_github_api_url(url):
         return url
-    request = urllib.request.Request(url, headers=_github_headers(binary=False))
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    request = urllib.request.Request(url, headers=_download_headers(url, binary=False))
+    with _open_url(request, timeout) as response:
         try:
             release = json.load(response)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -165,7 +199,9 @@ def download_bundle(
         raise BundleError(f"bundle release lookup failed with HTTP {error.code}.{hint}") from error
     except urllib.error.URLError as error:
         raise BundleError(f"bundle release lookup failed: {error.reason}") from error
-    request = urllib.request.Request(resolved_url, headers=_github_headers(binary=True))
+    request = urllib.request.Request(
+        resolved_url, headers=_download_headers(resolved_url, binary=True)
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".download", dir=destination.parent
@@ -175,7 +211,7 @@ def download_bundle(
     try:
         digest = hashlib.sha256()
         with (
-            urllib.request.urlopen(request, timeout=timeout) as response,
+            _open_url(request, timeout) as response,
             temporary.open("wb") as output,
         ):
             while chunk := response.read(DOWNLOAD_CHUNK_SIZE):

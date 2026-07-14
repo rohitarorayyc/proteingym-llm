@@ -1,9 +1,4 @@
-"""Connectivity check: send a tiny prompt to each model and report OK/FAIL.
-Validates keys + native model_ids + provider paths. Run before a big run.
-
-    python -m src.verify_models
-    python -m src.verify_models --models gemini-3.5-flash gpt-5.5
-"""
+"""Send a bounded connectivity probe to a user-supplied model endpoint."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from config.models import PRIMARY_MODELS, load_model_registry  # noqa: E402
+from config.models import load_model_registry  # noqa: E402
 from src import client  # noqa: E402
 
 PROBE_MAX_OUTPUT_TOKENS = 256
@@ -53,8 +48,8 @@ def _probe_error(response: dict) -> str | None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="*")
-    ap.add_argument("--registry")
+    ap.add_argument("--models", nargs="+", required=True)
+    ap.add_argument("--registry", required=True)
     ap.add_argument(
         "--canonical-settings",
         action="store_true",
@@ -66,7 +61,7 @@ def main() -> int:
     except (OSError, ValueError, json.JSONDecodeError) as error:
         ap.error(f"invalid model registry: {error}")
     failures = 0
-    for k in args.models or PRIMARY_MODELS:
+    for k in args.models:
         if k not in registry:
             ap.error(f"unknown model: {k}")
         spec = _probe_spec(registry[k], canonical_settings=args.canonical_settings)

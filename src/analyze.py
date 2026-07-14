@@ -19,11 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from config.models import N_BATCHES  # noqa: E402
-from config.paths import BASELINE_RESULTS_ROOT, RESULTS_ROOT  # noqa: E402
+from config.paths import RESULTS_ROOT  # noqa: E402
 from src import prompt  # noqa: E402
 from src.aggregate import SELECTION_TYPES, macro_headline, nested_macro  # noqa: E402
 from src.assays import PROMPT_REPAIR_VERSION, load_assay_meta  # noqa: E402
-from src.baselines import BaselineProvenanceError, validate_summary  # noqa: E402
 from src.data_bundle import BundleError  # noqa: E402
 from src.run import (  # noqa: E402
     RESULT_SCHEMA_VERSION,
@@ -39,55 +38,6 @@ from src.run import (  # noqa: E402
 )
 
 RESULTS = RESULTS_ROOT
-BASELINE_SUMMARY = BASELINE_RESULTS_ROOT / "summary.json"
-
-
-def _baseline_means(
-    data_bundle: dict,
-    *,
-    assays: set[str],
-    sizes: set[int],
-    seeds: set[int],
-) -> dict[int, tuple[str, float, dict]]:
-    if not BASELINE_SUMMARY.exists():
-        return {}
-    try:
-        summary = validate_summary(BASELINE_SUMMARY, data_bundle)
-    except BaselineProvenanceError as error:
-        print(f"warning: omitting unauthenticated baseline summary: {error}", file=sys.stderr)
-        return {}
-    selection = summary["selection"]
-    if set(selection["assays"]) != assays or set(selection["seeds"]) != seeds:
-        print(
-            "warning: omitting baseline summary because its assay/seed scope does not "
-            "match this analysis",
-            file=sys.stderr,
-        )
-        return {}
-    best: dict[int, tuple[str, float, dict]] = {}
-    partial = 0
-    for baseline, by_size in summary["baselines"].items():
-        for size_key, values in by_size.items():
-            size = int(size_key[1:])
-            if size not in sizes:
-                continue
-            coverage = values["coverage"]
-            if (
-                coverage["scored_cells"] != coverage["expected_cells"]
-                or coverage["scored_candidates"] != coverage["expected_candidates"]
-            ):
-                partial += 1
-                continue
-            rho = values.get("mean_rho_macro")
-            if rho is not None and (size not in best or rho > best[size][1]):
-                best[size] = (baseline, rho, coverage)
-    if partial:
-        print(
-            f"warning: omitted {partial} baseline/size summary entries without full "
-            "assay and candidate coverage",
-            file=sys.stderr,
-        )
-    return best
 
 
 def _seed_se(values: list[float]) -> float | None:
@@ -98,7 +48,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--models", nargs="*")
     parser.add_argument("--sizes", nargs="*", type=int)
-    parser.add_argument("--batches", nargs="*", type=int)
+    parser.add_argument("--seeds", "--batches", dest="batches", nargs="*", type=int)
     parser.add_argument("--assays", nargs="*")
     parser.add_argument("--max-len", type=int)
     parser.add_argument("--breakdown", action="store_true")
@@ -169,7 +119,7 @@ def main() -> None:
             parser.error(f"unknown assay(s): {', '.join(unknown_assays)}")
         keep_assays &= set(args.assays)
 
-    episode_cache: dict[tuple[str, int, int], tuple[str, str, int] | None] = {}
+    episode_cache: dict[tuple[str, int, int], tuple[str, str, list[str], list] | None] = {}
 
     def expected_episode(assay: str, size: int, batch: int):
         key = (assay, size, batch)
@@ -185,7 +135,8 @@ def main() -> None:
                     episode_cache[key] = (
                         prompt_sha256(prompt.SYSTEM_PROMPT, user),
                         split_sha256(subset),
-                        len(ids),
+                        ids,
+                        subset,
                     )
             except (KeyError, OSError, ValueError, json.JSONDecodeError):
                 episode_cache[key] = None
@@ -217,6 +168,36 @@ def main() -> None:
         expected_meta = meta.get(assay) or {}
         episode = expected_episode(assay, size, batch)
         condition = conditions.get(condition_key(model, size))
+        expected_ids = episode[2] if episode is not None else []
+        expected_subset = episode[3] if episode is not None else []
+        ranking = record.get("ranking")
+        raw_output = record.get("raw_output")
+        answer_text = record.get("answer_text")
+        parsed_raw = (
+            prompt.parse_ranking(raw_output, expected_ids) if isinstance(raw_output, str) else None
+        )
+        ranking_valid = bool(
+            isinstance(ranking, list)
+            and all(isinstance(item, str) for item in ranking)
+            and len(ranking) == len(expected_ids)
+            and len(set(ranking)) == len(ranking)
+            and set(ranking) == set(expected_ids)
+            and parsed_raw == ranking
+            and answer_text == raw_output
+        )
+        recomputed_rho = (
+            prompt.score_ranking(ranking, expected_ids, expected_subset) if ranking_valid else None
+        )
+        stored_rho = record.get("spearman")
+        score_valid = bool(
+            isinstance(stored_rho, (int, float))
+            and not isinstance(stored_rho, bool)
+            and math.isfinite(stored_rho)
+            and -1.0 <= stored_rho <= 1.0
+            and recomputed_rho is not None
+            and math.isclose(stored_rho, recomputed_rho, rel_tol=0.0, abs_tol=1e-12)
+        )
+        response_model_id = record.get("response_model_id")
         valid = all(
             (
                 condition is not None,
@@ -235,7 +216,7 @@ def main() -> None:
                 episode is not None,
                 episode is not None and record.get("prompt_sha256") == episode[0],
                 episode is not None and record.get("split_sha256") == episode[1],
-                episode is not None and record.get("n") == episode[2],
+                episode is not None and record.get("n") == len(expected_ids),
                 condition is not None and record.get("provider") == condition.get("provider"),
                 condition is not None
                 and record.get("provider_model_id") == condition.get("provider_model_id"),
@@ -255,19 +236,21 @@ def main() -> None:
                 and record.get("prompt_token_estimator") == condition.get("prompt_token_estimator"),
                 condition is not None and record.get("runtime") == condition.get("runtime"),
                 attempt_timestamps_valid(record),
-                "response_model_id" in record,
+                isinstance(response_model_id, str) and bool(response_model_id.strip()),
                 "provider_response_version" in record,
+                record.get("parsed") is True,
+                ranking_valid,
+                score_valid,
+                not record.get("error"),
+                not _is_truncated(record),
+                not record.get("overflow"),
             )
         )
         if not valid:
             counts["invalid"] += 1
             continue
-        if (
-            record.get("spearman") is not None
-            and not record.get("error")
-            and not _is_truncated(record)
-        ):
-            by_seed[(model, size, batch)][assay] = record["spearman"]
+        if record.get("spearman") is not None:
+            by_seed[(model, size, batch)][assay] = recomputed_rho
 
     invalid_total = sum(values["invalid"] for values in tally.values())
     if invalid_total and not args.allow_invalid:
@@ -326,7 +309,7 @@ def main() -> None:
         more = f"; +{len(coverage_gaps) - 12} more" if len(coverage_gaps) > 12 else ""
         raise SystemExit(
             "refusing unmatched/incomplete coverage; finish the run or pass explicit "
-            f"--assays/--batches filters ({detail}{more})"
+            f"--assays/--seeds filters ({detail}{more})"
         )
 
     # Ignore result directories that are not registered in this run manifest.
@@ -425,20 +408,6 @@ def main() -> None:
                     f"{group}={values['mean_rho']:+.3f}" for group, values in sorted(slices.items())
                 )
                 print(f"  {row['model']:22s} n{row['size']:<4} {text}")
-
-    baselines = _baseline_means(
-        data_bundle,
-        assays=keep_assays,
-        sizes={row["size"] for row in rows},
-        seeds=set(expected_batches),
-    )
-    if baselines:
-        print("\nbest full-coverage published baseline on authenticated frozen cells:")
-        for size, (name, rho, coverage) in sorted(baselines.items()):
-            print(
-                f"  n{size:<4} {rho:+.3f}  ({name}; "
-                f"{coverage['scored_cells']}/{coverage['expected_cells']} cells)"
-            )
 
     if args.csv:
         output = Path(args.csv)
