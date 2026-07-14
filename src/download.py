@@ -13,7 +13,9 @@ network, --from-local <dir> copies an existing ProteinGym folder instead.
     python -m src.download --what all
     python -m src.download --from-local /path/to/ProteinGym
 """
+
 from __future__ import annotations
+
 import argparse
 import shutil
 import sys
@@ -22,8 +24,9 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / "data"
+from config.paths import DATA_ROOT
+
+DATA = DATA_ROOT
 DMS = DATA / "DMS"
 REF = DATA / "reference"
 BASE = DATA / "baselines"
@@ -39,48 +42,37 @@ BASELINE_SPEARMAN_URLS = [
     "https://raw.githubusercontent.com/OATML-Markslab/ProteinGym/main/benchmarks/"
     "DMS_zero_shot/substitutions/Spearman/DMS_substitutions_Spearman_DMS_level.csv",
 ]
-HEADERS = {"User-Agent": "pg-agent/1.0"}
+HEADERS = {"User-Agent": "proteingym-llm/1.0"}
 
 
-def _contexts():
-    """Verified context first (certifi if available), then an unverified one as
-    fallback — some data hosts (e.g. marks.hms.harvard.edu) serve an incomplete
-    cert chain that even certifi can't verify in this environment."""
+def _ssl_context():
+    """Return a certificate-verifying TLS context (downloads fail closed)."""
     import ssl
-    ctxs = []
+
     try:
         import certifi
-        ctxs.append(ssl.create_default_context(cafile=certifi.where()))
-    except Exception:  # noqa
-        ctxs.append(ssl.create_default_context())
-    unverified = ssl.create_default_context()
-    unverified.check_hostname = False
-    unverified.verify_mode = ssl.CERT_NONE
-    ctxs.append(unverified)
-    return ctxs
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 def _download_to(url: str, dest: Path, timeout: int) -> int:
-    last = None
-    for i, ctx in enumerate(_contexts()):
-        req = urllib.request.Request(url, headers=HEADERS)
-        total = 0
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r, open(dest, "wb") as f:
-                while True:
-                    chunk = r.read(1 << 20)            # 1 MB
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    total += len(chunk)
-                    print(f"\r  {dest.name}: {total/1e6:8.1f} MB", end="", flush=True)
-            print()
-            return total
-        except urllib.error.URLError as e:
-            last = e
-            print(f"  ({'verified' if i == 0 else 'unverified'}) failed: {e}; "
-                  f"{'retrying unverified' if i == 0 else 'giving up'}")
-    raise last
+    request = urllib.request.Request(url, headers=HEADERS)
+    total = 0
+    with (
+        urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response,
+        dest.open("wb") as handle,
+    ):
+        while True:
+            chunk = response.read(1 << 20)
+            if not chunk:
+                break
+            handle.write(chunk)
+            total += len(chunk)
+            print(f"\r  {dest.name}: {total / 1e6:8.1f} MB", end="", flush=True)
+    print()
+    return total
 
 
 def _safe_extractall(z: zipfile.ZipFile, dest: Path) -> None:
@@ -97,7 +89,7 @@ def _safe_extractall(z: zipfile.ZipFile, dest: Path) -> None:
 def fetch_reference(timeout: int) -> None:
     REF.mkdir(parents=True, exist_ok=True)
     n = _download_to(REFERENCE_URL, REF / "DMS_substitutions.csv", timeout)
-    print(f"reference: {n} bytes -> {REF/'DMS_substitutions.csv'}")
+    print(f"reference: {n} bytes -> {REF / 'DMS_substitutions.csv'}")
 
 
 def fetch_dms(timeout: int) -> None:
@@ -132,7 +124,7 @@ def fetch_baselines(timeout: int) -> None:
         except Exception as e:  # noqa
             print(f"  summary failed: {e}")
     tmp = DATA / "_baselines.zip"
-    scores_dir = BASE / "zero_shot_substitutions_scores"   # baselines.py reads here
+    scores_dir = BASE / "zero_shot_substitutions_scores"  # baselines.py reads here
     for url in BASELINE_SCORES_ZIP_URLS:
         try:
             print(f"downloading per-variant baseline scores (1.9 GB): {url}")
@@ -153,7 +145,7 @@ def fetch_baselines(timeout: int) -> None:
             scores_dir.mkdir(parents=True, exist_ok=True)
             n, seen = 0, set()
             for csv in stage.rglob("*.csv"):
-                if csv.name in seen:            # two CSVs share a basename across subdirs
+                if csv.name in seen:  # two CSVs share a basename across subdirs
                     print(f"  warning: duplicate baseline CSV name, overwriting: {csv.name}")
                 seen.add(csv.name)
                 shutil.move(str(csv), str(scores_dir / csv.name))

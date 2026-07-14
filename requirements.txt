@@ -1,12 +1,1 @@
-# pg-agent — native multi-provider clients (no OpenRouter).
-# Python 3.10+.
-openai>=1.40
-anthropic>=0.40
-google-auth>=2.0
-requests>=2.30
-# Optional: matplotlib (plots, analysis only).
-#
-# Keys (process env or Designer-bench-v1/eval/.env):
-#   OPENAI_API_KEY, ANTHROPIC_API_KEY, GCP_KEY_JSON (Gemini/Vertex, base64 service account),
-#   DEEPINFRA_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY (Kimi),
-#   ALIBABA_API_KEY (Qwen/DashScope).
+-e .[all]

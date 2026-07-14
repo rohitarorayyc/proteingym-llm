@@ -1,0 +1,17 @@
+{
+  "models": {
+    "lab-model": {
+      "display_name": "Lab model",
+      "provider": "openai-compatible",
+      "api_style": "responses",
+      "model_id": "replace-with-model-id",
+      "api_key_env": "LAB_API_KEY",
+      "base_url_env": "LAB_BASE_URL",
+      "reasoning": "high",
+      "send_reasoning": true,
+      "max_tokens": 128000,
+      "ctx": 1000000,
+      "supports_batch": false
+    }
+  }
+}

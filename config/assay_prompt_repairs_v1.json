@@ -1,0 +1,183 @@
+{
+  "schema_version": 1,
+  "repair_set": "hard-prompt-repairs-v1",
+  "description": "Audited repairs for 23 ProteinGym assay descriptions whose generic metadata obscured the scored endpoint, direction, or exact experimental condition.",
+  "prompt_contract": {
+    "prompt_version": "ranking-v1",
+    "assay_label": "**Assay (what is measured):**",
+    "direction_sentence": "**Higher experimental fitness = HIGHER value of the measured property.**",
+    "note": "Only fitness_description changes for the listed assays; the inference wrapper and ProteinGym DMS_score orientation remain fixed."
+  },
+  "explicitly_unchanged": [
+    "PPM1D_HUMAN_Miller_2022",
+    "HMDH_HUMAN_Jiang_2019",
+    "RASK_HUMAN_Weng_2022_binding-DARPin_K55",
+    "NPC1_HUMAN_Erwood_2022_HEK293T",
+    "NPC1_HUMAN_Erwood_2022_RPE1",
+    "RNC_ECOLI_Weeks_2023",
+    "SCN5A_HUMAN_Glazer_2019"
+  ],
+  "repairs": {
+    "TADBP_HUMAN_Bolognesi_2019": {
+      "before": "OrganismalFitness; growth (surrogate for toxicity)",
+      "after": "TDP-43 toxicity in yeast; more-toxic variants cause slower yeast growth.",
+      "raw_phenotype": "toxicity",
+      "raw_directionality": 1,
+      "source_doi": "10.1038/s41467-019-12101-z"
+    },
+    "CCDB_ECOLI_Tripathi_2016": {
+      "before": "OrganismalFitness; growth (surrogate for toxicity/activity of CCDB)",
+      "after": "CcdB toxin activity in a CcdB-sensitive E. coli strain; more-active toxin causes less cell growth.",
+      "raw_phenotype": "score",
+      "raw_directionality": -1,
+      "source_doi": "10.1093/molbev/msw182"
+    },
+    "MK01_HUMAN_Brenan_2016": {
+      "before": "OrganismalFitness; Growth",
+      "after": "ERK2-dependent growth suppression after doxycycline-induced variant expression in BRAF-V600E A375 cells; greater depletion indicates stronger growth suppression.",
+      "raw_phenotype": "DOX_Average",
+      "raw_directionality": -1,
+      "source_doi": "10.1016/j.celrep.2016.09.061"
+    },
+    "MSH2_HUMAN_Jia_2020": {
+      "before": "OrganismalFitness; drug resistance (surrogate for protein activity, 6-thioguanine (6-TG))",
+      "after": "MSH2 mismatch-repair function during 6-thioguanine selection; functional variants are 6-TG-sensitive, whereas loss-of-function variants survive.",
+      "raw_phenotype": "LOF score",
+      "raw_directionality": -1,
+      "source_doi": "10.1016/j.ajhg.2020.12.003"
+    },
+    "P53_HUMAN_Giacomelli_2018_Null_Nutlin": {
+      "before": "OrganismalFitness; drug resistance (nutlin-3, etoposide)",
+      "after": "p53 function in TP53-null A549 cells under Nutlin-3; functional variants restore Nutlin-induced growth arrest and deplete.",
+      "raw_phenotype": "A549_p53NULL_Nutlin-3_Z-score",
+      "raw_directionality": -1,
+      "source_doi": "10.1038/s41588-018-0204-y"
+    },
+    "P53_HUMAN_Giacomelli_2018_WT_Nutlin": {
+      "before": "OrganismalFitness; drug resistance (nutlin-3, etoposide)",
+      "after": "Absence of dominant-negative p53 activity in TP53-WT A549 cells under Nutlin-3; dominant-negative variants inhibit endogenous p53, rescue growth, and enrich.",
+      "raw_phenotype": "A549_p53WT_Nutlin-3_Z-score",
+      "raw_directionality": -1,
+      "source_doi": "10.1038/s41588-018-0204-y"
+    },
+    "P53_HUMAN_Giacomelli_2018_Null_Etoposide": {
+      "before": "OrganismalFitness; drug resistance (nutlin-3, etoposide)",
+      "after": "Survival of TP53-null A549 cells during 5 µM etoposide treatment.",
+      "raw_phenotype": "A549_p53NULL_Etoposide_Z-score",
+      "raw_directionality": 1,
+      "source_doi": "10.1038/s41588-018-0204-y"
+    },
+    "P53_HUMAN_Kotler_2018": {
+      "before": "OrganismalFitness; growth",
+      "after": "p53 antiproliferative function in p53-null H1299 cells; functional variants deplete during competitive growth.",
+      "raw_phenotype": "RFS_H1299",
+      "raw_directionality": -1,
+      "source_doi": "10.1016/j.molcel.2018.06.012"
+    },
+    "SRC_HUMAN_Nguyen_2022": {
+      "before": "OrganismalFitness; growth enrichment",
+      "after": "Hsp90 dependence of Src phosphotransferase activity, measured as activity loss under 800 nM radicicol relative to DMSO; a larger loss indicates stronger Hsp90 dependence.",
+      "raw_phenotype": "diffsel",
+      "raw_directionality": -1,
+      "source_doi": "10.1002/pro.4656"
+    },
+    "SYUA_HUMAN_Newberry_2020": {
+      "before": "OrganismalFitness; Growth",
+      "after": "α-Synuclein toxicity in yeast; more-toxic variants cause slower yeast growth.",
+      "raw_phenotype": "Fitness Score",
+      "raw_directionality": -1,
+      "source_doi": "10.1021/acschembio.0c00339"
+    },
+    "GCN4_YEAST_Staller_2018": {
+      "before": "Binding; Binding",
+      "after": "Fold induction of Gcn4 activation-domain GFP-reporter activity during amino-acid starvation relative to complete medium.",
+      "raw_phenotype": "Induction",
+      "raw_directionality": 1,
+      "source_doi": "10.1016/j.cels.2018.01.015"
+    },
+    "NUD15_HUMAN_Suiter_2020": {
+      "before": "Expression",
+      "after": "Final NUDT15 activity score, defined as the lower of its protein-abundance score and thiopurine drug-sensitivity score.",
+      "raw_phenotype": "Final NUDT15 activity Score",
+      "raw_directionality": 1,
+      "source_doi": "10.1073/pnas.1915680117"
+    },
+    "SC6A4_HUMAN_Young_2021": {
+      "before": "Activity; Fluorescence",
+      "after": "Cell-surface expression of MYC-tagged SERT in Expi293F cells, measured by anti-MYC fluorescence.",
+      "raw_phenotype": "avg_MYC",
+      "raw_directionality": 1,
+      "source_doi": "10.1101/2021.04.19.440442"
+    },
+    "AACC1_PSEAI_Dandage_2018": {
+      "before": "OrganismalFitness; Antibiotic resistance under: heat/cold resistance (32C, 37C (ref), 42C), chemical stability (chemical chaperones TMAO, glycerol), antibiotic resistance (gentamicin), or combo",
+      "after": "Relative E. coli fitness conferred by AAC(3)-Ia under 12.5 µg/mL gentamicin selection at 30°C.",
+      "raw_phenotype": "30C",
+      "raw_directionality": 1,
+      "source_doi": "10.1371/journal.pgen.1007419"
+    },
+    "A4GRB6_PSEAI_Chen_2020": {
+      "before": "OrganismalFitness; drug resistance (128/16/2.0 ug/mL ampicillin, 4.0/0.5 ug/mL cefotaxime, 0.031 ug/mL meropenem @ 25C, 37C)",
+      "after": "Bacterial fitness conferred by VIM-2 under 0.031 µg/mL meropenem selection at 37°C.",
+      "raw_phenotype": "0.031ug_mL_MEM_37C",
+      "raw_directionality": 1,
+      "source_doi": "10.7554/eLife.56707"
+    },
+    "A0A1I9GEU1_NEIME_Kennouche_2019": {
+      "before": "Activity; piliation (20D9 anti-pilus monoclonal Ab), aggregation, adhesion (human umbilical vein endothelial cells (HUVECs))",
+      "after": "Piliation, measured as enrichment of 20D9 anti-pilus-antibody-positive N. meningitidis cells after FACS.",
+      "raw_phenotype": "piliation_log2_ratio",
+      "raw_directionality": 1,
+      "source_doi": "10.15252/embj.2019102145"
+    },
+    "DYR_ECOLI_Thompson_2019": {
+      "before": "OrganismalFitness; growth (turbidostat; -Lon for natural absence of Lon protease in E. coli, +Lon for exogenous protease)",
+      "after": "Relative E. coli growth of DHFR variants with chromosomal Lon protease reintroduced (+Lon), measured by selection coefficient.",
+      "raw_phenotype": "PlusLon_selection_coefficient",
+      "raw_directionality": 1,
+      "source_doi": "10.7554/eLife.53476"
+    },
+    "HSP82_YEAST_Flynn_2019": {
+      "before": "OrganismalFitness; growth, nitrogen depletion (0.0125% ammonium sulfate), hyperosmotic shock (0.8 M NaCl), alcohol stress (7.5% ethanol), sulfhydryl-oxidation (0.85 mM diamide), temperature shock (37C)",
+      "after": "Relative yeast growth supported by Hsp82 variants at 37°C, measured by selection coefficient.",
+      "raw_phenotype": "s (37°C)",
+      "raw_directionality": 1,
+      "source_doi": "10.7554/eLife.53810"
+    },
+    "R1AB_SARS2_Flynn_2022": {
+      "before": "OrganismalFitness; FRET, Growth",
+      "after": "SARS-CoV-2 Mpro protease function measured by the yeast-growth screen; the published functional score is normalized to WT-like function = 1 and stop-like loss of function = 0.",
+      "raw_phenotype": "average_growth",
+      "raw_directionality": 1,
+      "source_doi": "10.7554/eLife.77433"
+    },
+    "SRC_HUMAN_Chakraborty_2023_binding-DAS_25uM": {
+      "before": "Activity; Fluorescence measurement",
+      "after": "Src phosphotransferase activity retained in yeast during treatment with 25 µM dasatinib; higher retained activity indicates greater dasatinib resistance.",
+      "raw_phenotype": "DMS_score",
+      "raw_directionality": 1,
+      "source_doi": "10.1101/2021.12.05.471322"
+    },
+    "SPIKE_SARS2_Starr_2020_expression": {
+      "before": "Expression; ACE2 binding",
+      "after": "SARS-CoV-2 receptor-binding-domain cell-surface expression (expr_avg); ACE2 binding is not scored.",
+      "raw_phenotype": "expr_avg",
+      "raw_directionality": 1,
+      "source_doi": "10.1016/j.cell.2020.08.012"
+    },
+    "RAF1_HUMAN_Zinkus-Boltz_2019": {
+      "before": "OrganismalFitness; Viral Replication",
+      "after": "RAF1-KRAS binding, measured by binding-dependent phage enrichment during phage-assisted continuous selection.",
+      "raw_phenotype": "score",
+      "raw_directionality": 1,
+      "source_doi": "10.1021/acschembio.9b00669"
+    },
+    "GAL4_YEAST_Kitzman_2015": {
+      "before": "OrganismalFitness; Growth (no selection, 24h)",
+      "after": "Gal4 DNA-binding/transcriptional activity during 64-hour selective growth in SC-uracil-histidine medium with 1.5 mM 3-AT.",
+      "raw_phenotype": "SEL_C_64h",
+      "raw_directionality": 1,
+      "source_doi": "10.1038/nmeth.3223"
+    }
+  }
+}
