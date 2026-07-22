@@ -171,6 +171,11 @@ def main() -> None:
             continue
         if assay not in keep_assays:
             continue
+        # Ignore result directories that are not registered in this run manifest
+        # (e.g. a leftover model from an earlier run). They are dropped from the
+        # tally below, so they must not inflate the invalid-cell gate first.
+        if condition_key(model, size) not in conditions:
+            continue
         record = json.loads(path.read_text(encoding="utf-8"))
         counts = tally[(model, size)]
         counts["cells"] += 1

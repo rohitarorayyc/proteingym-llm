@@ -51,6 +51,20 @@ _FIELDS = {
 }
 
 
+def _value_has_embedded_secret(value: object) -> bool:
+    """Scan a field value, including list items (e.g. response_model_ids), for a secret.
+
+    Lists are recursed so a secret hidden in a list entry cannot bypass the check;
+    dicts are not, because per-field validation (including the api/base/credential
+    env-name exemption) is applied to each spec field individually by the caller.
+    """
+    if isinstance(value, str):
+        return bool(_URL_VALUE.match(value) or _SECRET_VALUE.match(value))
+    if isinstance(value, list):
+        return any(_value_has_embedded_secret(item) for item in value)
+    return False
+
+
 def _reject_embedded_secrets(name: str, spec: dict, allowed: set[str]) -> None:
     for field, value in spec.items():
         if field not in allowed and _SENSITIVE_FIELD.search(field):
@@ -60,7 +74,7 @@ def _reject_embedded_secrets(name: str, spec: dict, allowed: set[str]) -> None:
             )
         if field in {"api_key_env", "base_url_env", "credentials_env", "project_env"}:
             continue
-        if isinstance(value, str) and (_URL_VALUE.match(value) or _SECRET_VALUE.match(value)):
+        if _value_has_embedded_secret(value):
             raise ValueError(
                 f"model {name!r} field {field!r} looks like an embedded secret or URL; "
                 "reference an environment variable instead"

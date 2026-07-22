@@ -150,11 +150,16 @@ def _result_root(results_root: Path, run_label: str) -> Path:
     return results_root / "_runs" / run_label
 
 
-def _load_manifest(source_root: Path, run_label: str, data_bundle: dict) -> tuple[Path, dict]:
+def _load_manifest(source_root: Path, run_label: str, data_bundle: dict) -> tuple[Path, dict, str]:
     path = source_root / "_run.json"
     if not path.is_file():
         raise FileNotFoundError(f"run manifest missing: {path}")
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    # Hash the exact bytes we parse and audit against, so the bundle's
+    # source_manifest_sha256 cannot drift if a concurrent run rewrites _run.json
+    # between load and the (previously re-read) digest computation.
+    source_bytes = path.read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    manifest = json.loads(source_bytes)
     valid = all(
         (
             manifest.get("manifest_version") == RUN_MANIFEST_VERSION,
@@ -174,7 +179,7 @@ def _load_manifest(source_root: Path, run_label: str, data_bundle: dict) -> tupl
     )
     if not valid:
         raise PublicationBundleError(f"run-manifest provenance mismatch: {path}")
-    return path, manifest
+    return path, manifest, source_sha256
 
 
 def _selected_conditions(
@@ -266,7 +271,9 @@ def export_publication_bundle(
     """Write a deterministic gzip JSONL bundle after full score/provenance audit."""
     data_bundle = authenticate_data_bundle()
     source_root = _result_root(results_root, run_label)
-    manifest_path, source_manifest = _load_manifest(source_root, run_label, data_bundle)
+    manifest_path, source_manifest, source_manifest_sha256 = _load_manifest(
+        source_root, run_label, data_bundle
+    )
     conditions = source_manifest["conditions"]
     model_filter = set(models or [])
     size_filter = set(sizes or [])
@@ -344,7 +351,7 @@ def export_publication_bundle(
         "format": PUBLICATION_BUNDLE_FORMAT,
         "version": PUBLICATION_BUNDLE_VERSION,
         "run_label": run_label,
-        "source_manifest_sha256": _sha256_file(manifest_path),
+        "source_manifest_sha256": source_manifest_sha256,
         "data_bundle": data_bundle,
         "prompt_version": source_manifest.get("prompt_version"),
         "selection": {

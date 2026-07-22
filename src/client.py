@@ -6,6 +6,7 @@ import base64
 import email.utils
 import hashlib
 import json
+import math
 import os
 import socket
 import threading
@@ -242,10 +243,16 @@ def _safe_response_headers(headers: Any) -> dict[str, str]:
     return safe
 
 
-def _emit_response_stream_record(event_sink: Any, record: dict) -> None:
+def _emit_response_stream_record(event_sink: Any, record: dict, spec: dict) -> None:
     if event_sink is not None:
         try:
-            event_sink(record)
+            # Redact before the record is durably journaled: a hostile or buggy
+            # provider can echo the configured credential/endpoint into a header
+            # value or stream event, and the final result-level redaction happens
+            # too late to scrub the append-only transport journal.
+            event_sink(_redact_payload(record, spec))
+        except EventSinkError:
+            raise
         except Exception as error:  # noqa: BLE001
             raise EventSinkError("Responses event sink failed") from error
 
@@ -394,6 +401,7 @@ def _consume_responses_stream(
             "client_request_id": client_request_id,
             "headers": headers,
         },
+        spec,
     )
 
     terminal_event_type = None
@@ -420,6 +428,7 @@ def _consume_responses_stream(
                     "sequence_number": _field(event, "sequence_number", None),
                     "event": event_payload,
                 },
+                spec,
             )
             seen_events += 1
             event_response = _field(event, "response", None)
@@ -465,7 +474,13 @@ def _consume_responses_stream(
     finally:
         close = getattr(stream, "close", None)
         if callable(close):
-            close()
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                # Stream state is derived entirely from the observed events. A
+                # close() failure must never discard an already-observed terminal
+                # event and force a completed, billed request to be retried.
+                pass
 
     if terminal_event_type == "response.completed" and terminal_response is not None:
         if stream_error is None:
@@ -552,6 +567,7 @@ def _consume_responses_stream(
             "retryable": retryable,
             "provider_error": provider_error,
         },
+        spec,
     )
     return {
         "text": "".join(text_parts),
@@ -641,7 +657,12 @@ def _responses(
         return _normalize_responses_response(response)
     finally:
         if owned_http_client is not None:
-            owned_http_client.close()
+            try:
+                owned_http_client.close()
+            except Exception:  # noqa: BLE001
+                # Never let closing the owned HTTP client mask the request's real
+                # outcome (a completed stream or the original transport error).
+                pass
 
 
 def _consume_chat_stream(stream: Any) -> dict:
@@ -745,7 +766,32 @@ def _chat_completions(spec: dict, system: str, user: str, timeout: int) -> dict:
         kwargs["stream_options"] = {"include_usage": True}
         return _consume_chat_stream(api.chat.completions.create(**kwargs))
     response = api.chat.completions.create(**kwargs)
-    choice = response.choices[0]
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        # A 2xx body with no choices is an unusable-but-transient provider
+        # response: preserve it and mark it retryable instead of raising an
+        # IndexError that would be classified non-retryable and lose the body.
+        return {
+            "text": "",
+            "reasoning_text": None,
+            "response_content": [],
+            "usage": _jsonable(getattr(response, "usage", None)),
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "response_id": getattr(response, "id", None),
+            "response_model_id": getattr(response, "model", None),
+            "provider_response_version": None,
+            "provider_created_at": getattr(response, "created", None),
+            "status": "incomplete",
+            "incomplete_reason": "no_choices",
+            "stop_reason": None,
+            "service_tier": None,
+            "stream_completed": None,
+            "provider_response": _jsonable(response),
+            "error": "chat completion returned no choices",
+            "retryable": True,
+        }
+    choice = choices[0]
     message = choice.message
     usage = getattr(response, "usage", None)
     details = getattr(usage, "completion_tokens_details", None)
@@ -1074,6 +1120,10 @@ def _retry_after_seconds(error: Exception) -> float | None:
         if target.tzinfo is None:
             target = target.replace(tzinfo=timezone.utc)
         seconds = (target - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        # A non-finite Retry-After (e.g. "NaN"/"inf") is not a usable delay and
+        # must not be persisted as a non-standard JSON token.
+        return None
     return min(max(seconds, 0.0), 3600.0)
 
 
@@ -1255,6 +1305,7 @@ def chat(
                     "failure_class": failure_class or "transport_error",
                     "provider_error": provider_payload,
                 },
+                spec,
             )
         else:
             provider_payload = _redact_payload(_provider_error_payload(error), spec)

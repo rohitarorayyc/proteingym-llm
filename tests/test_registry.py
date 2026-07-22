@@ -158,6 +158,18 @@ def test_registry_rejects_top_level_secrets_and_unknown_fields(tmp_path):
         load_model_registry(path)
 
 
+def test_registry_rejects_secret_hidden_in_response_model_ids_list(tmp_path):
+    path = tmp_path / "models.json"
+    document = _document()
+    document["models"]["lab-model"]["response_model_ids"] = [
+        "internal-model",
+        "sk-live-should-not-be-stored",
+    ]
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="looks like an embedded secret or URL"):
+        load_model_registry(path)
+
+
 def test_chat_style_rejects_responses_only_options(tmp_path):
     document = _document()
     spec = document["models"]["lab-model"]

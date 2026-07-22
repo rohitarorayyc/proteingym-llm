@@ -222,6 +222,25 @@ def test_schema_shape_and_threshold_validation_fail_closed():
         pack_response_payload(*values, threshold=True)
 
 
+def test_inline_response_with_envelope_named_field_round_trips():
+    # A legitimate small provider response whose own JSON contains a field named
+    # like an envelope key must stay inline, not be misdetected as a packed
+    # envelope and rejected by unpack.
+    response_content = [{"type": "message"}]
+    for provider_response in (
+        {"id": "r", "content_encoding": "utf-8"},
+        {"id": "r", "payload": {"text": "hi"}},
+        {"id": "r", "schema": "openai", "compressed_sha256": "not-a-real-hash"},
+    ):
+        packed_content, packed_response = pack_response_payload(response_content, provider_response)
+        assert packed_content is response_content
+        assert packed_response is provider_response
+        assert unpack_response_payload(packed_content, packed_response) == (
+            response_content,
+            provider_response,
+        )
+
+
 def test_reference_and_envelope_must_appear_together():
     values = _large_values()
     reference, envelope = pack_response_payload(*values, threshold=0)

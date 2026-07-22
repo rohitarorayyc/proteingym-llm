@@ -58,6 +58,13 @@ def _is_truncated(record: dict) -> bool:
     return is_truncated(record)
 
 
+def _stream_evidence_valid(record: dict) -> bool:
+    # Import lazily to reuse the runner's exact streamed-completion evidence gate.
+    from src.run import stream_evidence_valid
+
+    return stream_evidence_valid(record)
+
+
 def audit_scored_cell(
     record: dict,
     *,
@@ -135,7 +142,8 @@ def audit_scored_cell(
         )
     )
     stream_valid = bool(
-        not inference_options.get("stream") or record.get("stream_completed") is True
+        (not inference_options.get("stream") or record.get("stream_completed") is True)
+        and _stream_evidence_valid(record)
     )
     response_content = None
     provider_response = None
@@ -206,6 +214,7 @@ def audit_scored_cell(
     require(ranking_valid, "ranking is not an exact parse of the frozen episode")
     require(score_valid, "stored Spearman score does not match recomputation")
     require(not record.get("error"), "result contains an error")
+    require(not record.get("truncated"), "result is marked truncated")
     require(not _is_truncated(record), "result is truncated")
     require(not record.get("overflow"), "result exceeds the context envelope")
 

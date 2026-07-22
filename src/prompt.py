@@ -74,7 +74,10 @@ def parse_ranking(text: str, ids: list[str]) -> list[str] | None:
     idset = set(ids)
     seen: set[str] = set()
     order: list[str] = []
-    for tok in re.findall(r"M\d{1,3}", blob):
+    # The trailing (?!\d) guard prevents an out-of-range id like "M1000" from
+    # being mis-tokenized as the valid id "M100"; such a token must not be
+    # silently accepted and scored.
+    for tok in re.findall(r"M\d{1,3}(?!\d)", blob):
         # zero-pad to match id format M01..
         norm = f"M{int(tok[1:]):02d}"
         if norm not in idset:

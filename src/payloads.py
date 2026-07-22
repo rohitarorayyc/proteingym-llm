@@ -31,6 +31,17 @@ _ENVELOPE_FIELDS = {
 }
 _REFERENCE_FIELDS = {"$ref", "raw_sha256"}
 _PAYLOAD_FIELDS = {"response_content", "provider_response"}
+# Fields a packed envelope always carries together. A real provider response
+# might coincidentally include one such name, so an envelope is only recognized
+# when at least two co-occur — pack() always emits all of them.
+_ENVELOPE_DISCRIMINATORS = {
+    "compressed_sha256",
+    "compressed_bytes",
+    "content_encoding",
+    "raw_bytes",
+    "raw_sha256",
+}
+_ENVELOPE_MIN_DISCRIMINATORS = 2
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -103,19 +114,21 @@ def pack_response_payload(
 
 
 def _looks_like_reference(value: Any) -> bool:
-    return isinstance(value, dict) and bool(set(value) & _REFERENCE_FIELDS)
+    # A packed reference always carries the "$ref" pointer. Keying off that exact
+    # field (rather than any overlapping name such as "raw_sha256") avoids
+    # misreading a legitimate inline provider response as a packed reference.
+    return isinstance(value, dict) and "$ref" in value
 
 
 def _looks_like_envelope(value: Any) -> bool:
-    markers = {
-        "schema",
-        "content_encoding",
-        "raw_bytes",
-        "compressed_bytes",
-        "compressed_sha256",
-        "payload",
-    }
-    return isinstance(value, dict) and bool(set(value) & markers)
+    # Recognize a packed envelope only when several of its compression-bookkeeping
+    # fields co-occur. This avoids misreading a legitimate inline provider response
+    # — even one whose own JSON happens to include a single field such as
+    # "content_encoding", "payload", or "schema" — as an envelope.
+    return (
+        isinstance(value, dict)
+        and len(_ENVELOPE_DISCRIMINATORS & set(value)) >= _ENVELOPE_MIN_DISCRIMINATORS
+    )
 
 
 def _require_exact_shape(value: Any, fields: set[str], label: str) -> dict[str, Any]:

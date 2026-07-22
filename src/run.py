@@ -843,6 +843,13 @@ def run_assay(
                 expected=record,
             ):
                 existing = json.loads(attempt.read_text(encoding="utf-8"))
+                if _record_succeeded(existing):
+                    # A prior run finalized a successful attempt but exited before
+                    # writing its canonical convenience copy. Re-materialize it so
+                    # a resumed run completes the cell instead of leaving it
+                    # permanently missing with no error to retry.
+                    write_result(output, existing)
+                    return existing
                 existing["execution_state"] = "unresolved_existing_attempt"
                 return existing
         estimated_tokens = record["prompt_tokens_estimate"]
@@ -954,8 +961,14 @@ def run_assay(
                     "stream", False
                 ):
                     current["response_received_at_utc"] = response_returned_at
-                record_response(current, response, ids, subset)
-            else:
+                try:
+                    record_response(current, response, ids, subset)
+                except Exception as error:  # noqa: BLE001
+                    # A failure while finalizing an otherwise-returned response
+                    # (e.g. an unencodable provider payload) must still yield a
+                    # finalized error attempt, never a stranded write-ahead record.
+                    failure = error
+            if failure is not None or response is None:
                 if failure is None:
                     failure = RuntimeError("client returned no response")
                 current.update(
@@ -1011,15 +1024,25 @@ def run_assay(
         return current
 
 
-def _record_succeeded(record: dict) -> bool:
-    """Return whether a non-dry-run record is safe to count as finalized."""
+def stream_evidence_valid(record: dict) -> bool:
+    """Require durable terminal-event evidence for a streamed Responses request.
+
+    A ``responses-sse`` cell is only trustworthy when its stored terminal event
+    and its append-only journal both prove a ``response.completed`` was observed.
+    Non-streamed transports carry their completion evidence elsewhere and pass.
+    """
     inference_options = record.get("request_descriptor", {}).get("inference_options", {})
-    is_responses_sse = inference_options.get("transport") == "responses-sse"
-    stream_evidence_valid = not is_responses_sse or bool(
+    if inference_options.get("transport") != "responses-sse":
+        return True
+    return bool(
         record.get("stream_completed") is True
         and record.get("stream_terminal_event") == "response.completed"
         and record.get("event_journal_event_type_counts", {}).get("response.completed", 0) >= 1
     )
+
+
+def _record_succeeded(record: dict) -> bool:
+    """Return whether a non-dry-run record is safe to count as finalized."""
     return bool(
         record.get("spearman") is not None
         and record.get("parsed")
@@ -1029,7 +1052,7 @@ def _record_succeeded(record: dict) -> bool:
         and attempt_timestamps_valid(record)
         and isinstance(record.get("response_model_id"), str)
         and bool(record["response_model_id"].strip())
-        and stream_evidence_valid
+        and stream_evidence_valid(record)
     )
 
 

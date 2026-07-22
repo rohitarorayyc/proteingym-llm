@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 from urllib.parse import urlsplit
 
@@ -40,6 +40,7 @@ from config.paths import DATA_ROOT
 DEFAULT_DATA_ROOT = DATA_ROOT
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 DOWNLOAD_CHUNK_SIZE = 1 << 20
+MAX_MANIFEST_BYTES = 64 << 20
 GITHUB_RELEASE_TAG_PATH = "/releases/tags/"
 GITHUB_API_HOST = "api.github.com"
 GITHUB_REPOSITORY_API_PREFIX = "/repos/rohitarorayyc/proteingym-llm/"
@@ -71,16 +72,29 @@ def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _atomic_stream_copy(source: BinaryIO, destination: Path) -> str:
-    """Copy a stream to *destination* atomically and return its SHA-256 digest."""
+def _atomic_stream_copy(
+    source: BinaryIO, destination: Path, *, max_bytes: int | None = None
+) -> str:
+    """Copy a stream to *destination* atomically and return its SHA-256 digest.
+
+    ``max_bytes`` bounds how many bytes are written so an over-long member (e.g. a
+    decompression bomb) cannot fill the filesystem before its length is checked
+    against the manifest.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".part", dir=destination.parent
     )
     digest = hashlib.sha256()
+    written = 0
     try:
         with os.fdopen(descriptor, "wb") as output:
             while chunk := source.read(DOWNLOAD_CHUNK_SIZE):
+                written += len(chunk)
+                if max_bytes is not None and written > max_bytes:
+                    raise BundleError(
+                        f"bundle member exceeds its manifest size of {max_bytes} bytes"
+                    )
                 output.write(chunk)
                 digest.update(chunk)
             output.flush()
@@ -238,9 +252,13 @@ def download_bundle(
 def _safe_relative_path(name: str) -> Path:
     """Convert an archive/manifest name to a safe platform-native relative path."""
     posix = PurePosixPath(name)
-    if not name or name.startswith("/") or posix.is_absolute():
+    # Also interpret the name as a Windows path so a drive-relative ("C:/x") or
+    # UNC name cannot escape staging on Windows, where "C:" would otherwise be
+    # treated as an ordinary POSIX path component.
+    windows = PureWindowsPath(name)
+    if not name or name.startswith("/") or posix.is_absolute() or windows.is_absolute():
         raise BundleError(f"unsafe absolute or empty bundle path: {name!r}")
-    if "\\" in name or any(part in {"", ".", ".."} for part in posix.parts):
+    if "\\" in name or windows.drive or any(part in {"", ".", ".."} for part in posix.parts):
         raise BundleError(f"unsafe bundle path: {name!r}")
     return Path(*posix.parts)
 
@@ -328,7 +346,14 @@ def _inspect_archive(
             if extracted is None:
                 raise BundleError(f"cannot read bundle member: {name!r}")
             if name == EVAL_BUNDLE_MANIFEST:
-                manifest_payload = extracted.read()
+                # Bound the read so a bomb manifest cannot exhaust memory before
+                # its pinned digest is checked. The real manifest is well under
+                # this cap even for a much larger benchmark.
+                manifest_payload = extracted.read(MAX_MANIFEST_BYTES + 1)
+                if len(manifest_payload) > MAX_MANIFEST_BYTES:
+                    raise BundleError(
+                        f"bundle manifest exceeds the {MAX_MANIFEST_BYTES}-byte limit"
+                    )
             else:
                 files[name] = member
 
@@ -374,9 +399,9 @@ def extract_bundle(
                 source = handle.extractfile(member)
                 if source is None:
                     raise BundleError(f"cannot read bundle member: {name!r}")
-                staged = stage / _safe_relative_path(name)
-                actual_sha = _atomic_stream_copy(source, staged)
                 record = manifest["files"][name]
+                staged = stage / _safe_relative_path(name)
+                actual_sha = _atomic_stream_copy(source, staged, max_bytes=record["size"])
                 if staged.stat().st_size != record["size"] or actual_sha != record["sha256"]:
                     raise BundleError(f"manifest checksum/size mismatch for {name!r}")
 

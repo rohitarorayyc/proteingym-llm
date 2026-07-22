@@ -61,11 +61,13 @@ def build_status(
     if not selected_conditions:
         raise ValueError("selection matched no run-manifest conditions")
     meta = load_assay_meta()
-    selected_assays = sorted(assays or meta)
+    # Deduplicate so repeated --assays/--seeds cannot double-count a cell or its
+    # immutable attempts (mirrors the duplicate rejection in the run/score CLIs).
+    selected_assays = sorted(set(assays) if assays else meta)
     unknown_assays = sorted(set(selected_assays) - set(meta))
     if unknown_assays:
         raise ValueError("unknown assay(s): " + ", ".join(unknown_assays))
-    selected_seeds = sorted(seeds or range(1, N_BATCHES + 1))
+    selected_seeds = sorted(set(seeds) if seeds else range(1, N_BATCHES + 1))
 
     attempt_root = ATTEMPTS if run_label == "canonical" else ATTEMPTS / run_label
     # Tests and callers with an alternate results root get its adjacent attempt tree.

@@ -41,3 +41,15 @@ def test_spearman_ties_and_constants():
     assert abs(prompt.spearman([1, 2, 3], [1, 2, 3]) - 1.0) < 1e-12
     assert abs(prompt.spearman([1, 2, 3], [3, 2, 1]) + 1.0) < 1e-12
     assert prompt.spearman([1, 2, 3], [5, 5, 5]) == 0.0
+
+
+def test_parse_ranking_rejects_out_of_range_adjacent_digit_ids():
+    ids = [f"M{i:02d}" for i in range(1, 101)]
+    # An out-of-range "M1000" must not be mis-tokenized as the valid id "M100"
+    # and silently complete an otherwise-99-item ranking.
+    tokens = ids[:99] + ["M1000"]
+    blob = '{"ranking": [' + ", ".join(f'"{token}"' for token in tokens) + "]}"
+    assert prompt.parse_ranking(blob, ids) is None
+    # An exact ranking (including the three-digit M100) still parses.
+    good = '{"ranking": [' + ", ".join(f'"{token}"' for token in ids) + "]}"
+    assert prompt.parse_ranking(good, ids) == ids

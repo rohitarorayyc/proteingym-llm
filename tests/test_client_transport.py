@@ -445,6 +445,54 @@ def test_chat_request_and_response_are_preserved(monkeypatch):
     assert result["response_content"][0]["choices"][0]["delta"]["reasoning_content"]
 
 
+def test_chat_empty_choices_is_retryable_and_preserves_body(monkeypatch):
+    class EmptyResponse:
+        choices: list = []
+        usage = None
+        id = "chatcmpl-empty"
+        model = "provider-model"
+        created = 1784174400
+
+    class Completions:
+        @staticmethod
+        def create(**_kwargs):
+            return EmptyResponse()
+
+    class FakeOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setattr(
+        client,
+        "_env",
+        lambda: {"LAB_API_KEY": "test-only-key", "LAB_BASE_URL": "https://inference.test/v1"},
+    )
+    spec = {
+        "provider": "openai-compatible",
+        "api_style": "chat",
+        "model_id": "m",
+        "api_key_env": "LAB_API_KEY",
+        "base_url_env": "LAB_BASE_URL",
+        "reasoning": "high",
+        "send_reasoning_effort": True,
+        "stream": False,
+        "chat_output_token_field": "max_tokens",
+        "max_tokens": 100,
+        "ctx": 1000,
+        "require_usage": False,
+        "require_reasoning": False,
+        "response_model_ids": [],
+    }
+
+    result = client._chat_completions(spec, "system", "user", timeout=30)
+
+    assert result["error"] == "chat completion returned no choices"
+    assert result["retryable"] is True
+    assert result["provider_response"] is not None
+    assert result["response_model_id"] == "provider-model"
+
+
 def test_provider_errors_redact_configured_key_and_endpoint(monkeypatch):
     spec = benchmark_spec(
         "chat-model",

@@ -123,6 +123,36 @@ def test_deterministic_package_round_trip_and_manifest_verification(tmp_path: Pa
         verify_data_bundle(installed, expected_manifest_sha256=manifest_sha256)
 
 
+def test_extraction_bounds_a_member_that_exceeds_its_manifest_size(tmp_path: Path):
+    manifest = {
+        "schema_version": EVAL_BUNDLE_SCHEMA_VERSION,
+        "bundle_version": "test",
+        "selection": {"sizes": [50], "seeds": [1]},
+        "provenance": EVAL_BUNDLE_PROVENANCE,
+        "files": {"safe.txt": {"sha256": hashlib.sha256(b"safe").hexdigest(), "size": 4}},
+    }
+    payload = json.dumps(manifest).encode()
+    archive = tmp_path / "oversized.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        info = tarfile.TarInfo(EVAL_BUNDLE_MANIFEST)
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+        oversized = b"x" * (2 * 1024 * 1024)  # far larger than the 4-byte manifest size
+        member = tarfile.TarInfo("safe.txt")
+        member.size = len(oversized)
+        tar.addfile(member, io.BytesIO(oversized))
+    manifest_sha = hashlib.sha256(
+        (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(BundleError, match="exceeds its manifest size"):
+        install_bundle(
+            archive,
+            sha256_file(archive),
+            tmp_path / "installed",
+            expected_manifest_sha256=manifest_sha,
+        )
+
+
 def test_package_requires_canonical_assay_descriptions(tmp_path: Path):
     source = _source_data(tmp_path)
     reference = source / "reference" / "DMS_substitutions.csv"
