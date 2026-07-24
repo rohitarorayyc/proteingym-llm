@@ -146,6 +146,89 @@ def test_google_vertex_native_request_and_response_are_lossless(monkeypatch):
     )
 
 
+def test_google_vertex_preserves_combined_visible_rationale(monkeypatch):
+    answer = (
+        "Compare the substitutions and penalize buried charge changes.\n\n"
+        '```json\n{"ranking":["M01","M02"]}\n```'
+    )
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [{"text": answer, "thoughtSignature": "opaque-signature"}],
+                },
+                "finishReason": "STOP",
+            }
+        ],
+        "modelVersion": "gemini-3.6-flash",
+        "responseId": "vertex-combined-rationale",
+        "usageMetadata": {
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 20,
+            "thoughtsTokenCount": 40,
+            "totalTokenCount": 160,
+        },
+    }
+
+    class Session:
+        @staticmethod
+        def post(*_args, **_kwargs):
+            return FakeGoogleResponse(payload)
+
+    monkeypatch.setattr(client, "_google_authorized_session", lambda _spec: Session())
+    monkeypatch.setattr(client, "_env", lambda: {"GOOGLE_CLOUD_PROJECT": "project"})
+
+    result = client.chat(_google_spec(), "system", "user")
+
+    assert result["text"] == answer
+    assert (
+        result["reasoning_text"] == "Compare the substitutions and penalize buried charge changes."
+    )
+    assert result["provider_response"] == payload
+
+
+def test_google_vertex_does_not_invent_reasoning_for_ranking_only_answer(monkeypatch):
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "text": '{"ranking":["M01","M02"]}',
+                            "thoughtSignature": "opaque-signature",
+                        }
+                    ],
+                },
+                "finishReason": "STOP",
+            }
+        ],
+        "modelVersion": "gemini-3.6-flash",
+        "responseId": "vertex-ranking-only",
+        "usageMetadata": {
+            "promptTokenCount": 100,
+            "candidatesTokenCount": 10,
+            "thoughtsTokenCount": 40,
+            "totalTokenCount": 150,
+        },
+    }
+
+    class Session:
+        @staticmethod
+        def post(*_args, **_kwargs):
+            return FakeGoogleResponse(payload)
+
+    monkeypatch.setattr(client, "_google_authorized_session", lambda _spec: Session())
+    monkeypatch.setattr(client, "_env", lambda: {"GOOGLE_CLOUD_PROJECT": "project"})
+
+    result = client.chat(_google_spec(), "system", "user")
+
+    assert result["text"] == '{"ranking":["M01","M02"]}'
+    assert result["reasoning_text"] is None
+    assert result["provider_response"] == payload
+
+
 def test_google_vertex_max_tokens_is_explicitly_truncated(monkeypatch):
     payload = {
         "candidates": [

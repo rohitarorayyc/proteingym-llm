@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import socket
 import threading
 import time
@@ -921,6 +922,39 @@ def _google_usage(usage_metadata: Any) -> tuple[dict | None, int | None, int | N
     return usage, output_tokens, thought_tokens, usage_metadata.get("trafficType")
 
 
+def _google_visible_reasoning(answer_text: str) -> str | None:
+    """Recover provider-visible rationale when Gemini combines it with the answer.
+
+    Gemini normally emits visible thought summaries in parts marked
+    ``thought=true``. Some model versions instead put the rationale and final
+    ranking in one ordinary text part while returning only an opaque thought
+    signature for the hidden chain. In that case the prose preceding the final
+    ranking is still provider-visible reasoning and can be preserved without
+    claiming that the encrypted chain was exposed.
+    """
+    text = answer_text.strip()
+    if not text:
+        return None
+
+    for match in reversed(list(re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.I))):
+        if '"ranking"' in match.group(1):
+            visible = f"{text[: match.start()]}\n{text[match.end() :]}".strip()
+            return visible or None
+
+    marker = text.rfind('{"ranking"')
+    if marker >= 0:
+        candidate = text[marker:].strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(parsed, dict) and isinstance(parsed.get("ranking"), list):
+                visible = text[:marker].strip()
+                return visible or None
+    return None
+
+
 def _google_vertex(
     spec: dict,
     system: str,
@@ -993,9 +1027,11 @@ def _google_vertex(
         status = "incomplete" if truncated else "completed"
 
     model_version = body.get("modelVersion")
+    answer_text = "".join(answer_parts)
+    reasoning_text = "\n\n".join(thought_parts) or _google_visible_reasoning(answer_text)
     return {
-        "text": "".join(answer_parts),
-        "reasoning_text": "\n\n".join(thought_parts) or None,
+        "text": answer_text,
+        "reasoning_text": reasoning_text,
         "response_content": candidates,
         "usage": usage,
         "output_tokens": output_tokens,
