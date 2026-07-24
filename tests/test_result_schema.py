@@ -257,6 +257,17 @@ def test_resume_policy_retries_only_requested_failures(tmp_path):
     assert not should_run(output, retry_errors=True)
     output.write_text(json.dumps({"error": None, "stop_reason": "max_tokens"}))
     assert should_run(output, retry_truncated=True)
+    output.write_text(
+        json.dumps(
+            {
+                "attempt_state": "request_in_progress",
+                "error": None,
+                "attempt_completed_at_utc": None,
+            }
+        )
+    )
+    assert not should_run(output)
+    assert should_run(output, retry_errors=True)
 
 
 def test_resume_rejects_mixed_provenance(tmp_path):

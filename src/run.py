@@ -636,9 +636,10 @@ def should_run(
                 f"{', '.join(mismatches)}; use --overwrite for a corrected canonical "
                 "rerun or --run-label for a separate sensitivity run"
             )
+    retryable_interrupted_attempt = record.get("attempt_state") == "request_in_progress"
     return (
         retry_errors
-        and bool(record.get("error"))
+        and (bool(record.get("error")) or retryable_interrupted_attempt)
         and not _is_deterministic_provider_failure(record)
     ) or (retry_truncated and _is_truncated(record))
 
