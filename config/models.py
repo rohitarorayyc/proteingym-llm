@@ -192,14 +192,15 @@ def validate_model_spec(spec: dict, *, name: str = "request") -> dict:
             r"v[0-9]+(?:beta[0-9]+)?", api_version
         ):
             raise ValueError(f"model {name!r} api_version must be a safe Google API version")
-        temperature = normalized.setdefault("temperature", 1.0)
-        if (
-            not isinstance(temperature, (int, float))
-            or isinstance(temperature, bool)
-            or not 0.0 < float(temperature) <= 2.0
-        ):
-            raise ValueError(f"model {name!r} temperature must be in (0, 2]")
-        normalized["temperature"] = float(temperature)
+        if "temperature" in normalized:
+            temperature = normalized["temperature"]
+            if (
+                not isinstance(temperature, (int, float))
+                or isinstance(temperature, bool)
+                or not 0.0 < float(temperature) <= 2.0
+            ):
+                raise ValueError(f"model {name!r} temperature must be in (0, 2]")
+            normalized["temperature"] = float(temperature)
         normalized.setdefault("include_thoughts", True)
         if not isinstance(normalized["include_thoughts"], bool):
             raise ValueError(f"model {name!r} include_thoughts must be boolean")

@@ -36,7 +36,6 @@ def _google_document(name="gemini-test"):
                 "reasoning": "high",
                 "max_tokens": 65535,
                 "ctx": 1048576,
-                "temperature": 1.0,
                 "include_thoughts": True,
                 "require_usage": True,
                 "require_reasoning": True,
@@ -95,7 +94,7 @@ def test_google_vertex_registry_freezes_native_generate_content_contract(tmp_pat
     assert spec["project_env"] == "GOOGLE_CLOUD_PROJECT"
     assert spec["location"] == "global"
     assert spec["api_version"] == "v1"
-    assert spec["temperature"] == 1.0
+    assert "temperature" not in spec
     assert spec["include_thoughts"] is True
     assert "google-vertex" in client.CALLERS
     with pytest.raises(ValueError, match="restricted to set size.*50"):
@@ -268,6 +267,7 @@ def test_google_request_provenance_is_stable_and_hides_project(monkeypatch, tmp_
     assert descriptor["location"] == "global"
     assert descriptor["credentials_env"] == "GCP_KEY_JSON"
     assert descriptor["project_env"] == "GOOGLE_CLOUD_PROJECT"
+    assert descriptor["inference_options"]["temperature"] == "provider_default"
     assert descriptor["inference_options"]["thinking"] == {
         "level": "high",
         "include_thoughts": True,

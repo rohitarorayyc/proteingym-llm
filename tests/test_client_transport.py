@@ -38,7 +38,6 @@ def _google_spec(reasoning="high"):
         "reasoning": reasoning,
         "max_tokens": 65535,
         "ctx": 1048576,
-        "temperature": 1.0,
         "include_thoughts": True,
         "require_usage": True,
         "require_reasoning": True,
@@ -118,12 +117,12 @@ def test_google_vertex_native_request_and_response_are_lossless(monkeypatch):
         "systemInstruction": {"parts": [{"text": "system"}]},
         "generationConfig": {
             "maxOutputTokens": 65535,
-            "temperature": 1.0,
             "thinkingConfig": {"thinkingLevel": "HIGH", "includeThoughts": True},
         },
     }
     descriptor = client.public_request_descriptor(_google_spec())
     assert descriptor["reasoning_effort"] == "high"
+    assert descriptor["inference_options"]["temperature"] == "provider_default"
     assert descriptor["inference_options"]["thinking"]["level"] == "high"
     assert result["text"] == '{"ranking":["M01","M02"]}'
     assert result["reasoning_text"] == "Compare the substitutions."

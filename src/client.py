@@ -76,7 +76,7 @@ def public_request_descriptor(spec: dict) -> dict:
     if normalized["provider"] == "google-vertex":
         options = {
             "transport": "vertex-generate-content-sync",
-            "temperature": normalized["temperature"],
+            "temperature": normalized.get("temperature", "provider_default"),
             "thinking": {
                 "level": normalized["reasoning"],
                 "include_thoughts": normalized["include_thoughts"],
@@ -931,17 +931,19 @@ def _google_vertex(
 ) -> dict:
     """Make exactly one synchronous native Vertex ``generateContent`` request."""
     del reasoning_summary  # Vertex thought visibility is frozen by the registry.
+    generation_config = {
+        "maxOutputTokens": spec["max_tokens"],
+        "thinkingConfig": {
+            "thinkingLevel": spec["reasoning"].upper(),
+            "includeThoughts": spec["include_thoughts"],
+        },
+    }
+    if "temperature" in spec:
+        generation_config["temperature"] = spec["temperature"]
     request_body = {
         "contents": [{"role": "user", "parts": [{"text": user}]}],
         "systemInstruction": {"parts": [{"text": system}]},
-        "generationConfig": {
-            "maxOutputTokens": spec["max_tokens"],
-            "temperature": spec["temperature"],
-            "thinkingConfig": {
-                "thinkingLevel": spec["reasoning"].upper(),
-                "includeThoughts": spec["include_thoughts"],
-            },
-        },
+        "generationConfig": generation_config,
     }
     response = _google_authorized_session(spec).post(
         _endpoint(spec),
