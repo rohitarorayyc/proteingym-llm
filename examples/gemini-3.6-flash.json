@@ -1,0 +1,28 @@
+{
+  "models": {
+    "gemini-3.6-flash": {
+      "display_name": "Gemini 3.6 Flash",
+      "provider": "google-vertex",
+      "api_style": "generate-content",
+      "model_id": "gemini-3.6-flash",
+      "credentials_env": "GCP_KEY_JSON",
+      "project_env": "GOOGLE_CLOUD_PROJECT",
+      "location": "global",
+      "api_version": "v1",
+      "reasoning": "high",
+      "max_tokens": 65536,
+      "ctx": 1048576,
+      "include_thoughts": true,
+      "allowed_sizes": [
+        50,
+        100
+      ],
+      "require_usage": true,
+      "require_reasoning": true,
+      "response_model_ids": [
+        "gemini-3.6-flash"
+      ],
+      "leaderboard_preset": true
+    }
+  }
+}

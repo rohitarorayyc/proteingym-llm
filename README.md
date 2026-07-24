@@ -77,6 +77,11 @@ For Chat Completions, set `chat_output_token_field` to `max_tokens` or
 `generateContent` endpoints are also supported; see the registry validation in
 [`config/models.py`](config/models.py) for the accepted fields.
 
+The exact public registry used for the Gemini 3.6 Flash high-thinking N=50 and
+N=100 runs is provided in
+[`examples/gemini-3.6-flash.json`](examples/gemini-3.6-flash.json). It preserves
+provider-default sampling by omitting `temperature`.
+
 Start conservatively. Use the provider limits shown for your account and set a
 single process-wide token budget when needed:
 
