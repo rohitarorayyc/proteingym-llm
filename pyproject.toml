@@ -10,7 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{name = "Rohit Arora"}]
+authors = [
+  {name = "Rohit Arora"},
+  {name = "Leo Tianlai Chen"},
+  {name = "Melissa Du"},
+  {name = "Debora S. Marks"},
+  {name = "George M. Church"},
+]
 dependencies = [
   "certifi>=2024.2",
   "google-auth>=2.40",

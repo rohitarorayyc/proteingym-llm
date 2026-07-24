@@ -166,7 +166,7 @@ python -m build
 ```bibtex
 @misc{arora2026pgllm,
   title  = {PG-LLM: Can LLMs Rank Protein Variants by Fitness?},
-  author = {Arora, Rohit and Chen, Leo Tianlai and Church, George},
+  author = {Arora, Rohit and Chen, Leo Tianlai and Du, Melissa and Marks, Debora S. and Church, George M.},
   year   = {2026},
   note   = {Harvard University}
 }
