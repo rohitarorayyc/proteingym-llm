@@ -1222,3 +1222,447 @@ def test_stream_eof_without_terminal_finish_preserves_partial_payload(monkeypatc
     assert result["output_tokens"] == 42
     assert len(result["response_content"]) == 2
     assert result["provider_response"]["chunks"] == result["response_content"]
+
+
+def _anthropic_spec(**overrides):
+    spec = {
+        "provider": "anthropic",
+        "api_style": "messages",
+        "model_id": "claude-test-1",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "reasoning": "max",
+        "max_tokens": 128000,
+        "ctx": 1000000,
+        "include_thoughts": True,
+        "require_usage": True,
+        "response_model_ids": ["claude-test-1"],
+        "leaderboard_preset": True,
+    }
+    spec.update(overrides)
+    return spec
+
+
+def _anthropic_message(stop_reason="end_turn", *, stop_details=None):
+    return Dumpable(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test-1",
+        content=[
+            Dumpable(
+                type="thinking",
+                thinking="Compared substitutions at conserved positions.",
+                signature="sig",
+            ),
+            Dumpable(type="text", text='Reasoning first.\n{"ranking": ["M02", "M01"]}'),
+        ],
+        stop_reason=stop_reason,
+        stop_sequence=None,
+        stop_details=stop_details,
+        usage=Dumpable(
+            input_tokens=1200,
+            output_tokens=340,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+            output_tokens_details=Dumpable(thinking_tokens=300),
+            service_tier="standard",
+        ),
+    )
+
+
+class _FakeAnthropicStream:
+    def __init__(self, events, *, snapshot, raise_after=None):
+        self._events = events
+        self._snapshot = snapshot
+        self._raise_after = raise_after
+        self.closed = False
+        self.response = SimpleNamespace(
+            headers={
+                "request-id": "req_anthropic",
+                "anthropic-ratelimit-tokens-remaining": "900000",
+                "Set-Cookie": "must-not-persist",
+            }
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+        return False
+
+    def __iter__(self):
+        for index, event in enumerate(self._events):
+            if self._raise_after is not None and index == self._raise_after:
+                raise self._raise_after_error
+            yield event
+
+    @property
+    def current_message_snapshot(self):
+        return self._snapshot
+
+    def close(self):
+        self.closed = True
+
+
+def _install_fake_anthropic(monkeypatch, *, stream=None, message=None, sent=None):
+    import anthropic
+
+    class Messages:
+        @staticmethod
+        def stream(**kwargs):
+            if sent is not None:
+                sent.update(kwargs)
+            return stream
+
+        @staticmethod
+        def create(**kwargs):
+            if sent is not None:
+                sent.update(kwargs)
+            return message
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            if sent is not None:
+                sent["__client__"] = kwargs
+            self.messages = Messages()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+    monkeypatch.setattr(client, "_env", lambda: {"ANTHROPIC_API_KEY": "secret-anthropic-key"})
+
+
+def test_anthropic_stream_journals_wire_events_and_requires_message_stop(monkeypatch):
+    sent = {}
+    records = []
+    final = _anthropic_message()
+    events = [
+        Dumpable(type="message_start", message=Dumpable(id="msg_test", model="claude-test-1")),
+        Dumpable(type="content_block_start", index=0, content_block=Dumpable(type="thinking")),
+        Dumpable(type="thinking", thinking="Compared", snapshot="Compared"),
+        Dumpable(
+            type="content_block_delta",
+            index=0,
+            delta=Dumpable(type="thinking_delta", thinking="Compared"),
+        ),
+        Dumpable(type="content_block_stop", index=0),
+        Dumpable(type="text", text="Reasoning", snapshot="Reasoning"),
+        Dumpable(type="message_delta", delta=Dumpable(stop_reason="end_turn")),
+        Dumpable(type="message_stop", message=final),
+    ]
+    stream = _FakeAnthropicStream(events, snapshot=final)
+    _install_fake_anthropic(monkeypatch, stream=stream, sent=sent)
+
+    result = client.chat(
+        _anthropic_spec(),
+        "system",
+        "user",
+        timeout=123,
+        client_request_id="canary-request-2",
+        event_sink=records.append,
+    )
+
+    assert sent["__client__"] == {
+        "api_key": "secret-anthropic-key",
+        "timeout": 123,
+        "max_retries": 0,
+    }
+    assert sent["model"] == "claude-test-1"
+    assert sent["max_tokens"] == 128000
+    assert sent["system"] == "system"
+    assert sent["messages"] == [{"role": "user", "content": "user"}]
+    assert sent["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert sent["output_config"] == {"effort": "max"}
+    assert sent["extra_headers"] == {"X-Client-Request-Id": "canary-request-2"}
+    assert "temperature" not in sent
+    assert "fallbacks" not in sent
+
+    assert records[0] == {
+        "kind": "response.headers",
+        "client_request_id": "canary-request-2",
+        "headers": {
+            "request-id": "req_anthropic",
+            "anthropic-ratelimit-tokens-remaining": "900000",
+        },
+    }
+    assert [record["event_type"] for record in records[1:]] == [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+    ]
+    assert stream.closed is True
+    assert result["stream_completed"] is True
+    assert result["stream_terminal_event"] == "message_stop"
+    assert result["status"] == "completed"
+    assert result["stop_reason"] == "end_turn"
+    assert result["error"] is None
+    assert result["retryable"] is False
+    assert result["text"] == 'Reasoning first.\n{"ranking": ["M02", "M01"]}'
+    assert result["reasoning_text"] == "Compared substitutions at conserved positions."
+    assert result["response_model_id"] == "claude-test-1"
+    assert result["response_id"] == "msg_test"
+    assert result["output_tokens"] == 340
+    assert result["reasoning_tokens"] == 300
+    assert result["usage"]["output_tokens"] == 340
+    assert result["usage"]["total_tokens"] == 1540
+    assert result["usage"]["reasoning_tokens"] == 300
+    assert result["service_tier"] == "standard"
+    assert result["provider_response"] == final.model_dump(mode="json")
+    assert result["client_request_id"] == "canary-request-2"
+
+
+def test_anthropic_refusal_is_a_preserved_policy_block(monkeypatch):
+    final = _anthropic_message(
+        "refusal",
+        stop_details=Dumpable(type="refusal", category="bio", explanation="classifier"),
+    )
+    stream = _FakeAnthropicStream([Dumpable(type="message_stop", message=final)], snapshot=final)
+    _install_fake_anthropic(monkeypatch, stream=stream)
+
+    result = client.chat(_anthropic_spec(), "system", "user", event_sink=lambda _r: None)
+
+    assert result["stream_completed"] is True
+    assert result["status"] == "refused"
+    assert result["stop_reason"] == "refusal"
+    assert result["failure_class"] == "provider_policy_block"
+    assert result["incomplete_reason"] == "provider_policy_block"
+    assert result["retryable"] is False
+    assert result["error"] == "provider refused request: bio (classifier)"
+    assert result["provider_response"] == final.model_dump(mode="json")
+
+
+def test_anthropic_max_tokens_is_explicitly_truncated(monkeypatch):
+    final = _anthropic_message("max_tokens")
+    stream = _FakeAnthropicStream([Dumpable(type="message_stop", message=final)], snapshot=final)
+    _install_fake_anthropic(monkeypatch, stream=stream)
+
+    result = client.chat(_anthropic_spec(), "system", "user")
+
+    assert result["status"] == "incomplete"
+    assert result["incomplete_reason"] == "max_tokens"
+    assert result["stop_reason"] == "max_tokens"
+    assert result["error"] is None
+    assert result["retryable"] is False
+
+
+def test_anthropic_stream_interruption_preserves_partial_snapshot(monkeypatch):
+    import anthropic
+
+    records = []
+    partial = Dumpable(
+        id="msg_partial",
+        model="claude-test-1",
+        content=[Dumpable(type="thinking", thinking="Partial", signature="")],
+        stop_reason=None,
+        stop_sequence=None,
+        stop_details=None,
+        usage=Dumpable(input_tokens=1200, output_tokens=0),
+    )
+    events = [Dumpable(type="message_start", message=Dumpable(id="msg_partial"))]
+    stream = _FakeAnthropicStream(events, snapshot=partial, raise_after=1)
+    stream._raise_after_error = anthropic.APIConnectionError(
+        message="Connection reset with secret-anthropic-key",
+        request=SimpleNamespace(),
+    )
+    # Raise after the first event has been yielded.
+    stream._events = events + [Dumpable(type="content_block_start", index=0)]
+    _install_fake_anthropic(monkeypatch, stream=stream)
+
+    result = client.chat(
+        _anthropic_spec(),
+        "system",
+        "user",
+        client_request_id="canary-request-3",
+        event_sink=records.append,
+    )
+
+    assert [record["kind"] for record in records] == [
+        "response.headers",
+        "response.event",
+        "response.stream_error",
+    ]
+    assert records[-1]["failure_class"] == "transport_error"
+    assert records[-1]["retryable"] is True
+    assert "secret-anthropic-key" not in json.dumps(records)
+    assert "secret-anthropic-key" not in json.dumps(result)
+    assert result["stream_completed"] is False
+    assert result["stream_terminal_event"] is None
+    assert result["status"] == "incomplete"
+    assert result["incomplete_reason"] == "stream_interrupted"
+    assert result["failure_class"] == "transport_error"
+    assert result["retryable"] is True
+    assert result["error"].startswith("APIConnectionError:")
+    assert result["reasoning_text"] == "Partial"
+    assert result["response_id"] == "msg_partial"
+    assert result["provider_response"] == partial.model_dump(mode="json")
+
+
+def test_anthropic_stream_without_terminal_event_is_retryable_protocol_error(monkeypatch):
+    partial = Dumpable(
+        id="msg_partial",
+        model="claude-test-1",
+        content=[],
+        stop_reason=None,
+        stop_sequence=None,
+        stop_details=None,
+        usage=None,
+    )
+    stream = _FakeAnthropicStream(
+        [Dumpable(type="message_start", message=Dumpable(id="msg_partial"))], snapshot=partial
+    )
+    _install_fake_anthropic(monkeypatch, stream=stream)
+
+    result = client.chat(_anthropic_spec(), "system", "user")
+
+    assert result["stream_completed"] is False
+    assert result["incomplete_reason"] == "missing_terminal_event"
+    assert result["failure_class"] == "stream_protocol_error"
+    assert result["retryable"] is True
+    assert result["usage"] is None
+
+
+def test_anthropic_sync_transport_normalizes_the_same_fields(monkeypatch):
+    sent = {}
+    final = _anthropic_message()
+    _install_fake_anthropic(monkeypatch, message=final, sent=sent)
+
+    result = client.chat(_anthropic_spec(stream=False), "system", "user")
+
+    assert sent["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "stream_completed" not in result
+    assert result["status"] == "completed"
+    assert result["output_tokens"] == 340
+    assert result["usage"]["output_tokens"] == 340
+    descriptor = client.public_request_descriptor(_anthropic_spec(stream=False))
+    assert descriptor["inference_options"]["transport"] == "anthropic-messages-sync"
+    assert descriptor["inference_options"]["stream"] is False
+
+
+def test_anthropic_request_errors_redact_key_and_classify_status(monkeypatch):
+    import anthropic
+
+    class Messages:
+        @staticmethod
+        def stream(**_kwargs):
+            raise anthropic.RateLimitError(
+                "rate limit exceeded for secret-anthropic-key",
+                response=httpx.Response(
+                    429,
+                    headers={"retry-after": "7"},
+                    request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+                ),
+                body={"type": "error", "error": {"type": "rate_limit_error"}},
+            )
+
+    class FakeAnthropic:
+        def __init__(self, **_kwargs):
+            self.messages = Messages()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+    monkeypatch.setattr(client, "_env", lambda: {"ANTHROPIC_API_KEY": "secret-anthropic-key"})
+    records = []
+
+    result = client.chat(
+        _anthropic_spec(), "system", "user", client_request_id="c", event_sink=records.append
+    )
+
+    assert result["retryable"] is True
+    assert result["retry_after_s"] == 7.0
+    assert "secret-anthropic-key" not in json.dumps(result)
+    assert "<redacted-api-key>" in result["error"]
+    assert result["provider_error"]["body"]["error"]["type"] == "rate_limit_error"
+    assert records[-1]["kind"] == "response.transport_error"
+    assert records[-1]["retryable"] is True
+
+
+def test_anthropic_hidden_thinking_is_requested_as_omitted(monkeypatch):
+    sent = {}
+    final = _anthropic_message()
+    final.content = [block for block in final.content if block.type == "text"]
+    stream = _FakeAnthropicStream([Dumpable(type="message_stop", message=final)], snapshot=final)
+    _install_fake_anthropic(monkeypatch, stream=stream, sent=sent)
+
+    result = client.chat(_anthropic_spec(include_thoughts=False), "system", "user")
+
+    assert sent["thinking"] == {"type": "adaptive", "display": "omitted"}
+    assert result["reasoning_text"] is None
+    assert result["status"] == "completed"
+
+
+def test_anthropic_workspace_header_is_sent_and_redacted(monkeypatch):
+    import anthropic
+
+    sent = {}
+    final = _anthropic_message()
+    stream = _FakeAnthropicStream([Dumpable(type="message_stop", message=final)], snapshot=final)
+
+    class Messages:
+        @staticmethod
+        def stream(**kwargs):
+            sent.update(kwargs)
+            return stream
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            sent["__client__"] = kwargs
+            self.messages = Messages()
+
+    monkeypatch.setattr(anthropic, "Anthropic", FakeAnthropic)
+    monkeypatch.setattr(
+        client,
+        "_env",
+        lambda: {
+            "ANTHROPIC_API_KEY": "secret-anthropic-key",
+            "ANTHROPIC_WORKSPACE_ID": "wrkspc_private_workspace",
+        },
+    )
+    spec = _anthropic_spec(workspace_env="ANTHROPIC_WORKSPACE_ID")
+
+    result = client.chat(spec, "system", "user")
+
+    assert sent["__client__"]["default_headers"] == {
+        "anthropic-workspace-id": "wrkspc_private_workspace"
+    }
+    assert result["status"] == "completed"
+    redacted = client._redact_payload(
+        {"error": "workspace wrkspc_private_workspace rejected secret-anthropic-key"}, spec
+    )
+    assert redacted == {"error": "workspace <redacted-workspace-id> rejected <redacted-api-key>"}
+    assert "default_headers" not in _anthropic_spec()  # default client omits the header
+
+
+def test_anthropic_quota_error_mid_stream_is_a_deterministic_failure(monkeypatch):
+    import anthropic
+
+    partial = Dumpable(
+        id="msg_partial",
+        model="claude-test-1",
+        content=[],
+        stop_reason=None,
+        stop_sequence=None,
+        stop_details=None,
+        usage=None,
+    )
+    stream = _FakeAnthropicStream(
+        [Dumpable(type="message_start", message=Dumpable(id="msg_partial"))],
+        snapshot=partial,
+        raise_after=1,
+    )
+    stream._raise_after_error = anthropic.APIError(
+        message="Your credit balance is too low to access the Anthropic API.",
+        request=SimpleNamespace(),
+        body={"type": "error", "error": {"type": "invalid_request_error"}},
+    )
+    stream._events = stream._events + [Dumpable(type="content_block_start", index=0)]
+    _install_fake_anthropic(monkeypatch, stream=stream)
+
+    result = client.chat(_anthropic_spec(), "system", "user")
+
+    assert result["status"] == "failed"
+    assert result["failure_class"] == "quota_exhausted"
+    assert result["incomplete_reason"] == "quota_exhausted"
+    assert result["retryable"] is False
+    assert result["stream_completed"] is False
+    assert result["stream_terminal_event"] is None

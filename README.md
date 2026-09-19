@@ -93,6 +93,11 @@ N=100 runs is provided in
 [`examples/gemini-3.6-flash.json`](examples/gemini-3.6-flash.json). It preserves
 provider-default sampling by omitting `temperature`.
 
+[`examples/anthropic_model.json`](examples/anthropic_model.json) targets the
+native Anthropic Messages API (`provider: "anthropic"`): `reasoning` is an
+effort level (`low` … `max`), thinking is adaptive, and responses stream. Set
+`ANTHROPIC_API_KEY`; organization-scoped keys also need `workspace_env`.
+
 Start conservatively. Use the provider limits shown for your account and set a
 single process-wide token budget when needed:
 

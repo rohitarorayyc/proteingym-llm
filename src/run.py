@@ -71,6 +71,7 @@ CORE_DISTRIBUTIONS = ("proteingym-llm", "certifi", "tiktoken")
 PROVIDER_DISTRIBUTIONS = {
     "openai-compatible": ("openai", "httpx", "pydantic"),
     "google-vertex": ("google-auth", "requests", "urllib3"),
+    "anthropic": ("anthropic", "httpx2", "pydantic"),
 }
 
 
@@ -1025,20 +1026,29 @@ def run_assay(
         return current
 
 
-def stream_evidence_valid(record: dict) -> bool:
-    """Require durable terminal-event evidence for a streamed Responses request.
+_STREAM_TERMINAL_EVENTS = {
+    "responses-sse": "response.completed",
+    "anthropic-messages-sse": "message_stop",
+}
 
-    A ``responses-sse`` cell is only trustworthy when its stored terminal event
-    and its append-only journal both prove a ``response.completed`` was observed.
-    Non-streamed transports carry their completion evidence elsewhere and pass.
+
+def stream_evidence_valid(record: dict) -> bool:
+    """Require durable terminal-event evidence for a streamed request.
+
+    A streamed cell is only trustworthy when its stored terminal event and its
+    append-only journal both prove the provider's terminal event was observed
+    (``response.completed`` for Responses SSE, ``message_stop`` for Anthropic
+    Messages SSE).  Non-streamed transports carry their completion evidence
+    elsewhere and pass.
     """
     inference_options = record.get("request_descriptor", {}).get("inference_options", {})
-    if inference_options.get("transport") != "responses-sse":
+    terminal_event = _STREAM_TERMINAL_EVENTS.get(inference_options.get("transport"))
+    if terminal_event is None:
         return True
     return bool(
         record.get("stream_completed") is True
-        and record.get("stream_terminal_event") == "response.completed"
-        and record.get("event_journal_event_type_counts", {}).get("response.completed", 0) >= 1
+        and record.get("stream_terminal_event") == terminal_event
+        and record.get("event_journal_event_type_counts", {}).get(terminal_event, 0) >= 1
     )
 
 

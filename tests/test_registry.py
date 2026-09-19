@@ -128,7 +128,7 @@ def test_registry_requires_explicit_file_and_safe_model_slug(tmp_path):
         ("base_url", "https://private.example/v1", "forbids embedded secret/URL field"),
         ("unexpected", "value", "unknown config fields"),
         ("base_url_env", "https://private.example/v1", "environment variable name"),
-        ("provider", "anthropic", "provider must be 'openai-compatible'"),
+        ("provider", "azure-openai", "provider must be one of"),
     ],
 )
 def test_registry_rejects_secrets_urls_unknown_fields_and_other_providers(
@@ -284,3 +284,125 @@ def test_request_provenance_requires_resolved_endpoint(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "_env", lambda: {})
     with pytest.raises(RuntimeError, match="LAB_BASE_URL not set"):
         client.request_provenance(spec)
+
+
+def _anthropic_document(name="claude-test"):
+    return {
+        "models": {
+            name: {
+                "provider": "anthropic",
+                "model_id": "claude-test-1",
+                "reasoning": "max",
+                "max_tokens": 128000,
+                "ctx": 1000000,
+                "require_usage": True,
+                "response_model_ids": ["claude-test-1"],
+                "leaderboard_preset": True,
+            }
+        }
+    }
+
+
+def test_anthropic_registry_defaults_to_streamed_summarized_messages(tmp_path):
+    path = tmp_path / "anthropic.json"
+    path.write_text(json.dumps(_anthropic_document()))
+
+    registry = load_model_registry(path)
+    spec = registry["claude-test"]
+    assert spec["api_style"] == "messages"
+    assert spec["api_key_env"] == "ANTHROPIC_API_KEY"
+    assert "base_url_env" not in spec
+    assert spec["stream"] is True
+    assert spec["include_thoughts"] is True
+    assert spec["require_reasoning"] is False
+
+    descriptor = client.public_request_descriptor(spec)
+    assert descriptor["provider"] == "anthropic"
+    assert descriptor["base_url_env"] is None
+    assert descriptor["inference_options"]["transport"] == "anthropic-messages-sse"
+    assert descriptor["inference_options"]["thinking"] == {
+        "type": "adaptive",
+        "display": "summarized",
+    }
+    assert descriptor["inference_options"]["effort"] == "max"
+    assert descriptor["inference_options"]["temperature"] == "provider_default"
+    # Non-primary set sizes fall back to the shared "high" effort like every provider.
+    assert benchmark_spec("claude-test", 100, registry=registry)["reasoning"] == "high"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("api_style", "chat", "anthropic api_style must be 'messages'"),
+        ("reasoning", "minimal", "anthropic reasoning must be one of"),
+        ("temperature", 0.5, "anthropic forbids non-Messages field"),
+        ("service_tier", "priority", "anthropic forbids non-Messages field"),
+        ("send_reasoning", True, "anthropic forbids non-Messages field"),
+        ("chat_output_token_field", "max_tokens", "anthropic forbids non-Messages field"),
+        ("credentials_env", "GCP_KEY_JSON", "anthropic forbids non-Messages field"),
+        ("base_url_env", "https://gateway.example", "environment variable name"),
+        ("include_thoughts", "yes", "include_thoughts must be boolean"),
+    ],
+)
+def test_anthropic_registry_rejects_foreign_and_unsafe_fields(tmp_path, field, value, message):
+    document = _anthropic_document()
+    document["models"]["claude-test"][field] = value
+    path = tmp_path / "anthropic.json"
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match=message):
+        load_model_registry(path)
+
+
+def test_anthropic_registry_rejects_hidden_required_reasoning(tmp_path):
+    document = _anthropic_document()
+    document["models"]["claude-test"]["include_thoughts"] = False
+    document["models"]["claude-test"]["require_reasoning"] = True
+    path = tmp_path / "anthropic.json"
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="require_reasoning=true requires include_thoughts=true"):
+        load_model_registry(path)
+
+
+def test_anthropic_gateway_override_changes_only_the_endpoint_hash(monkeypatch, tmp_path):
+    document = _anthropic_document()
+    path = tmp_path / "anthropic.json"
+    path.write_text(json.dumps(document))
+    default_descriptor = client.public_request_descriptor(load_model_registry(path)["claude-test"])
+
+    document["models"]["claude-test"]["base_url_env"] = "CLAUDE_GATEWAY_URL"
+    path.write_text(json.dumps(document))
+    monkeypatch.setattr(client, "_env", lambda: {"CLAUDE_GATEWAY_URL": "https://gateway.test/"})
+    gateway_descriptor = client.public_request_descriptor(load_model_registry(path)["claude-test"])
+
+    assert gateway_descriptor["base_url_env"] == "CLAUDE_GATEWAY_URL"
+    assert gateway_descriptor["endpoint_sha256"] != default_descriptor["endpoint_sha256"]
+    assert client.fingerprint_request_descriptor(
+        gateway_descriptor
+    ) != client.fingerprint_request_descriptor(default_descriptor)
+
+
+def test_anthropic_workspace_env_is_recorded_by_name_only(tmp_path):
+    document = _anthropic_document()
+    document["models"]["claude-test"]["workspace_env"] = "ANTHROPIC_WORKSPACE_ID"
+    path = tmp_path / "anthropic.json"
+    path.write_text(json.dumps(document))
+
+    spec = load_model_registry(path)["claude-test"]
+    descriptor = client.public_request_descriptor(spec)
+    assert descriptor["workspace_env"] == "ANTHROPIC_WORKSPACE_ID"
+
+    document["models"]["claude-test"]["workspace_env"] = "wrkspc_literal_value-1"
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="workspace_env must be an environment variable name"):
+        load_model_registry(path)
+
+
+@pytest.mark.parametrize("builder", [_document, _google_document])
+def test_workspace_env_is_rejected_for_other_providers(tmp_path, builder):
+    document = builder()
+    (name,) = document["models"]
+    document["models"][name]["workspace_env"] = "ANTHROPIC_WORKSPACE_ID"
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="workspace_env"):
+        load_model_registry(path)

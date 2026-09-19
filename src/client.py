@@ -23,6 +23,7 @@ from config.paths import WORK_ROOT
 ENV_FILE = WORK_ROOT / ".env"
 PUBLIC_REQUEST_DESCRIPTOR_VERSION = 2
 RESPONSES_SSE_DESCRIPTOR_VERSION = 3
+ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 
 
 @lru_cache(maxsize=1)
@@ -67,8 +68,17 @@ def _endpoint(spec: dict) -> str:
             f"https://{host}/{spec['api_version']}/projects/{project}/locations/{location}"
             f"/publishers/google/models/{spec['model_id']}:generateContent"
         )
+    if spec["provider"] == "anthropic":
+        return f"{_anthropic_base_url(spec)}/v1/messages"
     path = "responses" if spec["api_style"] == "responses" else "chat/completions"
     return f"{_base_url(spec)}/{path}"
+
+
+def _anthropic_base_url(spec: dict) -> str:
+    """Return the Messages API origin, honouring an optional gateway override."""
+    if spec.get("base_url_env"):
+        return _base_url(spec)
+    return ANTHROPIC_DEFAULT_BASE_URL
 
 
 def public_request_descriptor(spec: dict) -> dict:
@@ -103,6 +113,40 @@ def public_request_descriptor(spec: dict) -> dict:
             "accepted_response_model_ids": normalized["response_model_ids"],
             "project_env": normalized["project_env"],
             "credentials_env": normalized["credentials_env"],
+            "endpoint_sha256": hashlib.sha256(_endpoint(normalized).encode()).hexdigest(),
+        }
+    if normalized["provider"] == "anthropic":
+        options = {
+            "transport": (
+                "anthropic-messages-sse" if normalized["stream"] else "anthropic-messages-sync"
+            ),
+            "stream": normalized["stream"],
+            "temperature": "provider_default",
+            "thinking": {
+                "type": "adaptive",
+                "display": "summarized" if normalized["include_thoughts"] else "omitted",
+            },
+            "effort": normalized["reasoning"],
+            "required_response_metadata": {
+                "usage": normalized["require_usage"],
+                "reasoning": normalized["require_reasoning"],
+            },
+        }
+        return {
+            "descriptor_version": PUBLIC_REQUEST_DESCRIPTOR_VERSION,
+            "provider": "anthropic",
+            "model_id": normalized["model_id"],
+            "api_style": normalized["api_style"],
+            "reasoning_effort": normalized["reasoning"],
+            "max_output_tokens": normalized["max_tokens"],
+            "context_window": normalized["ctx"],
+            "service_tier": None,
+            "tokenizer_encoding": normalized.get("tokenizer_encoding"),
+            "inference_options": options,
+            "accepted_response_model_ids": normalized["response_model_ids"],
+            "api_key_env": normalized["api_key_env"],
+            "base_url_env": normalized.get("base_url_env"),
+            "workspace_env": normalized.get("workspace_env"),
             "endpoint_sha256": hashlib.sha256(_endpoint(normalized).encode()).hexdigest(),
         }
     style = normalized["api_style"]
@@ -239,7 +283,9 @@ def _safe_response_headers(headers: Any) -> dict[str, str]:
     safe: dict[str, str] = {}
     for name, value in items:
         lowered = str(name).lower()
-        if lowered in _SAFE_RESPONSE_HEADERS or lowered.startswith("x-ratelimit-"):
+        if lowered in _SAFE_RESPONSE_HEADERS or lowered.startswith(
+            ("x-ratelimit-", "anthropic-ratelimit-")
+        ):
             safe[lowered] = str(value)
     return safe
 
@@ -1052,6 +1098,311 @@ def _google_vertex(
     }
 
 
+_DETERMINISTIC_FAILURES = frozenset({"provider_policy_block", "quota_exhausted"})
+_ANTHROPIC_RAW_EVENT_TYPES = frozenset(
+    {
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "ping",
+    }
+)
+
+
+def _anthropic_client(spec: dict, timeout: int):
+    from anthropic import Anthropic
+
+    kwargs = {"api_key": _key(spec["api_key_env"]), "timeout": timeout, "max_retries": 0}
+    if spec.get("base_url_env"):
+        kwargs["base_url"] = _base_url(spec)
+    if spec.get("workspace_env"):
+        # Organization-scoped keys must name the billing workspace on every request.
+        kwargs["default_headers"] = {"anthropic-workspace-id": _key(spec["workspace_env"])}
+    return Anthropic(**kwargs)
+
+
+def _anthropic_request(spec: dict, system: str, user: str, client_request_id: str | None) -> dict:
+    """Build the frozen Messages request: adaptive thinking, explicit effort, no sampling."""
+    kwargs = {
+        "model": spec["model_id"],
+        "max_tokens": spec["max_tokens"],
+        "system": system,
+        "messages": [{"role": "user", "content": user}],
+        "thinking": {
+            "type": "adaptive",
+            "display": "summarized" if spec["include_thoughts"] else "omitted",
+        },
+        "output_config": {"effort": spec["reasoning"]},
+    }
+    if client_request_id is not None:
+        kwargs["extra_headers"] = {"X-Client-Request-Id": client_request_id}
+    return kwargs
+
+
+def _anthropic_usage(usage: Any) -> tuple[dict | None, int | None, int | None, str | None]:
+    """Normalize billing counters while retaining every provider usage field."""
+    if usage is None:
+        return None, None, None, None
+    raw = _jsonable(usage)
+    normalized = dict(raw) if isinstance(raw, dict) else {}
+    input_tokens = _field(usage, "input_tokens", None)
+    output_tokens = _field(usage, "output_tokens", None)
+    cache_creation = _field(usage, "cache_creation_input_tokens", None)
+    cache_read = _field(usage, "cache_read_input_tokens", None)
+    thinking_tokens = _field(_field(usage, "output_tokens_details", None), "thinking_tokens", None)
+    counted = [
+        value
+        for value in (input_tokens, cache_creation, cache_read, output_tokens)
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+    normalized.update(
+        {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": sum(counted) if counted else None,
+            "reasoning_tokens": thinking_tokens,
+            "cached_tokens": cache_read,
+        }
+    )
+    return normalized, output_tokens, thinking_tokens, _field(usage, "service_tier", None)
+
+
+def _normalize_anthropic_message(
+    message: Any,
+    *,
+    stream_completed: bool | None = None,
+    error: str | None = None,
+    incomplete_reason: str | None = None,
+    retryable: bool | None = None,
+    failure_class: str | None = None,
+    provider_error: Any = None,
+) -> dict:
+    """Normalize a complete or partial Messages object without dropping fields."""
+    content = _field(message, "content", None) or []
+    text_parts = [
+        str(_field(block, "text", "") or "")
+        for block in content
+        if _field(block, "type", "") == "text"
+    ]
+    thinking_parts = [
+        str(_field(block, "thinking", ""))
+        for block in content
+        if _field(block, "type", "") == "thinking" and _field(block, "thinking", "")
+    ]
+    stop_reason = _field(message, "stop_reason", None)
+    stop_details = _field(message, "stop_details", None)
+    usage, output_tokens, reasoning_tokens, service_tier = _anthropic_usage(
+        _field(message, "usage", None)
+    )
+
+    if error is not None or stream_completed is False:
+        status = "failed" if failure_class in _DETERMINISTIC_FAILURES else "incomplete"
+        incomplete_reason = incomplete_reason or "stream_interrupted"
+        error = error or "Messages stream ended before message_stop"
+    elif stop_reason == "end_turn":
+        status = "completed"
+    elif stop_reason == "max_tokens":
+        status = "incomplete"
+        incomplete_reason = "max_tokens"
+    elif stop_reason == "refusal":
+        category = _field(stop_details, "category", None) or "unspecified"
+        explanation = _field(stop_details, "explanation", None)
+        status = "refused"
+        failure_class = "provider_policy_block"
+        incomplete_reason = failure_class
+        error = f"provider refused request: {category}" + (
+            f" ({explanation})" if explanation else ""
+        )
+        retryable = False
+    elif stop_reason is None:
+        status = "incomplete"
+        incomplete_reason = "missing_stop_reason"
+        error = "provider response missing stop_reason"
+        retryable = True
+    else:
+        # pause_turn, tool_use, model_context_window_exceeded, or a future value:
+        # fail closed and let the runner refuse to score it.
+        status = "incomplete"
+        incomplete_reason = str(stop_reason)
+        retryable = False
+    if failure_class is None and error:
+        failure_class = _provider_failure_class(error, provider_error)
+        if failure_class is not None:
+            incomplete_reason = failure_class
+            retryable = False
+    if retryable is None:
+        retryable = bool(error) and not _non_retryable(error)
+
+    result = {
+        "text": "".join(text_parts),
+        "reasoning_text": "\n\n".join(thinking_parts) or None,
+        "response_content": [_jsonable(block) for block in content],
+        "usage": usage,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "response_id": _field(message, "id", None),
+        "response_model_id": _field(message, "model", None),
+        "provider_response_version": None,
+        "provider_created_at": None,
+        "status": status,
+        "incomplete_reason": incomplete_reason,
+        "stop_reason": stop_reason,
+        "stop_sequence": _field(message, "stop_sequence", None),
+        "service_tier": service_tier,
+        "provider_response": _jsonable(message) if message is not None else None,
+        "provider_error": provider_error,
+        "error": error,
+        "retryable": retryable,
+        "failure_class": failure_class,
+    }
+    if stream_completed is not None:
+        result["stream_completed"] = stream_completed
+        result["stream_terminal_event"] = "message_stop" if stream_completed else None
+    return result
+
+
+def _consume_anthropic_stream(
+    stream: Any,
+    *,
+    spec: dict,
+    event_sink: Any = None,
+    client_request_id: str | None = None,
+) -> dict:
+    """Consume a Messages SSE stream, accepting only ``message_stop`` as success."""
+    response = getattr(stream, "response", None)
+    _emit_response_stream_record(
+        event_sink,
+        {
+            "kind": "response.headers",
+            "client_request_id": client_request_id,
+            "headers": _safe_response_headers(getattr(response, "headers", None)),
+        },
+        spec,
+    )
+    seen_events = 0
+    terminal_event_type = None
+    stream_error = None
+    stream_failure_class = None
+    stream_retryable = None
+    provider_error = None
+    try:
+        for event in stream:
+            event_type = str(_field(event, "type", "") or "")
+            if event_type not in _ANTHROPIC_RAW_EVENT_TYPES:
+                # The SDK also synthesizes convenience events (text, thinking,
+                # signature) that duplicate raw deltas; journal only the wire events.
+                continue
+            _emit_response_stream_record(
+                event_sink,
+                {
+                    "kind": "response.event",
+                    "client_request_id": client_request_id,
+                    "event_type": event_type,
+                    "event": _jsonable(event),
+                },
+                spec,
+            )
+            seen_events += 1
+            if event_type == "message_stop":
+                terminal_event_type = event_type
+    except EventSinkError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        stream_error = _redact_error(f"{type(error).__name__}: {error}", spec)
+        provider_error = _redact_payload(_provider_error_payload(error), spec)
+        stream_failure_class = _provider_failure_class(stream_error, provider_error)
+        stream_retryable = bool(
+            stream_failure_class is None
+            and (_error_is_retryable(error, stream_error) or not _non_retryable(stream_error))
+        )
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    try:
+        snapshot = stream.current_message_snapshot
+    except Exception:  # noqa: BLE001
+        snapshot = None
+
+    if terminal_event_type == "message_stop" and snapshot is not None:
+        result = _normalize_anthropic_message(snapshot, stream_completed=True)
+        if stream_error is not None:
+            result["post_completion_stream_error"] = stream_error
+        return result
+
+    if stream_error is not None:
+        incomplete_reason = stream_failure_class or "stream_interrupted"
+        error = stream_error
+        failure_class = stream_failure_class or (
+            "transport_error" if stream_retryable else "stream_exception"
+        )
+        retryable = bool(stream_retryable)
+    elif seen_events == 0:
+        incomplete_reason = "empty_stream"
+        error = "Messages stream ended without events"
+        failure_class = "stream_protocol_error"
+        retryable = True
+    else:
+        incomplete_reason = "missing_terminal_event"
+        error = "Messages stream ended without message_stop"
+        failure_class = "stream_protocol_error"
+        retryable = True
+    _emit_response_stream_record(
+        event_sink,
+        {
+            "kind": "response.stream_error",
+            "client_request_id": client_request_id,
+            "error": error,
+            "failure_class": failure_class,
+            "incomplete_reason": incomplete_reason,
+            "retryable": retryable,
+            "provider_error": provider_error,
+        },
+        spec,
+    )
+    return _normalize_anthropic_message(
+        snapshot,
+        stream_completed=False,
+        error=error,
+        incomplete_reason=incomplete_reason,
+        retryable=retryable,
+        failure_class=failure_class,
+        provider_error=provider_error,
+    )
+
+
+def _anthropic_messages(
+    spec: dict,
+    system: str,
+    user: str,
+    timeout: int,
+    *,
+    reasoning_summary: bool = True,
+    client_request_id: str | None = None,
+    event_sink: Any = None,
+) -> dict:
+    """Make exactly one native Anthropic Messages request."""
+    del reasoning_summary  # Thinking visibility is frozen by the registry.
+    api = _anthropic_client(spec, timeout)
+    kwargs = _anthropic_request(spec, system, user, client_request_id)
+    if not spec["stream"]:
+        return _normalize_anthropic_message(api.messages.create(**kwargs))
+    with api.messages.stream(**kwargs) as stream:
+        return _consume_anthropic_stream(
+            stream,
+            spec=spec,
+            event_sink=event_sink,
+            client_request_id=client_request_id,
+        )
+
+
 def _call(
     spec: dict,
     system: str,
@@ -1078,6 +1429,7 @@ def _call(
 CALLERS = {
     "openai-compatible": _call,
     "google-vertex": _google_vertex,
+    "anthropic": _anthropic_messages,
 }
 
 
@@ -1128,6 +1480,17 @@ def _error_is_retryable(error: Exception, message: str) -> bool:
         "httpx.WriteError",
         "httpx.WriteTimeout",
         "openai.APIConnectionError",
+        "anthropic.APIConnectionError",
+        "httpx2.ConnectError",
+        "httpx2.ConnectTimeout",
+        "httpx2.NetworkError",
+        "httpx2.PoolTimeout",
+        "httpx2.ReadError",
+        "httpx2.ReadTimeout",
+        "httpx2.RemoteProtocolError",
+        "httpx2.TransportError",
+        "httpx2.WriteError",
+        "httpx2.WriteTimeout",
         "requests.exceptions.ChunkedEncodingError",
         "requests.exceptions.ConnectionError",
         "requests.exceptions.ContentDecodingError",
@@ -1193,11 +1556,13 @@ def _private_replacements(spec: dict) -> list[tuple[str, str]]:
         return sorted(replacements, key=lambda item: len(item[0]), reverse=True)
     else:
         api_key = environment.get(spec["api_key_env"])
-        base_url = environment.get(spec["base_url_env"])
+        base_url = environment.get(spec["base_url_env"]) if spec.get("base_url_env") else None
+        workspace = environment.get(spec["workspace_env"]) if spec.get("workspace_env") else None
         candidates = {
             (api_key or "", "<redacted-api-key>"),
             (base_url or "", "<redacted-base-url>"),
             ((base_url or "").rstrip("/"), "<redacted-base-url>"),
+            (workspace or "", "<redacted-workspace-id>"),
         }
     return sorted(
         ((value, marker) for value, marker in candidates if len(value) >= 8),
@@ -1290,7 +1655,7 @@ def chat(
     started = time.time()
     try:
         caller_kwargs = {"reasoning_summary": reasoning_summary}
-        if spec["provider"] == "openai-compatible":
+        if spec["provider"] in {"openai-compatible", "anthropic"}:
             caller_kwargs.update(
                 client_request_id=client_request_id,
                 event_sink=event_sink,
@@ -1327,7 +1692,11 @@ def chat(
         }
         if client_request_id is not None:
             result["client_request_id"] = client_request_id
-        if event_sink is not None and spec["api_style"] == "responses" and spec["stream"]:
+        if (
+            event_sink is not None
+            and spec["api_style"] in {"responses", "messages"}
+            and spec["stream"]
+        ):
             provider_payload = _redact_payload(_provider_error_payload(error), spec)
             failure_class = _provider_failure_class(message, provider_payload)
             if failure_class is not None:

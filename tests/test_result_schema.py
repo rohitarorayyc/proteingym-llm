@@ -1319,3 +1319,84 @@ def test_overwrite_archives_prior_canonical_by_content_hash(tmp_path, monkeypatc
     replacement = json.loads((final_dir / "assay.json").read_text())
     assert replacement["ranking"] == ["M02", "M01"]
     assert replacement["supersedes_sha256"] == old_hash
+
+
+ANTHROPIC_SPEC = {
+    "provider": "anthropic",
+    "model_id": "claude-test-1",
+    "reasoning": "max",
+    "max_tokens": 128000,
+    "ctx": 1000000,
+    "require_usage": True,
+    "response_model_ids": ["claude-test-1"],
+    "leaderboard_preset": True,
+}
+
+
+def _anthropic_completed_response():
+    return {
+        "text": '{"ranking":["M01","M02"]}',
+        "reasoning_text": "Compared substitutions.",
+        "response_content": [{"type": "text", "text": '{"ranking":["M01","M02"]}'}],
+        "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+        "output_tokens": 20,
+        "reasoning_tokens": 15,
+        "response_id": "msg_1",
+        "response_model_id": "claude-test-1",
+        "provider_response_version": None,
+        "provider_created_at": None,
+        "status": "completed",
+        "incomplete_reason": None,
+        "stop_reason": "end_turn",
+        "service_tier": "standard",
+        "provider_response": {"id": "msg_1", "stop_reason": "end_turn"},
+        "stream_completed": True,
+        "stream_terminal_event": "message_stop",
+        "error": None,
+        "retryable": False,
+    }
+
+
+@pytest.mark.parametrize("journal_has_terminal", [True, False])
+def test_runner_requires_journaled_message_stop_for_anthropic_stream(
+    tmp_path, monkeypatch, journal_has_terminal
+):
+    from src import run
+
+    monkeypatch.setattr(client, "_env", lambda: {"ANTHROPIC_API_KEY": "test-key"})
+    subset = [("v1", "A", 1.0), ("v2", "B", 0.0)]
+    attempt_dir = tmp_path / "attempts"
+
+    def fake_chat(*_args, **kwargs):
+        sink = kwargs["event_sink"]
+        sink({"kind": "response.headers", "headers": {"request-id": "req_anthropic"}})
+        sink({"kind": "response.event", "event": {"type": "message_start"}})
+        if journal_has_terminal:
+            sink({"kind": "response.event", "event": {"type": "message_stop"}})
+        return _anthropic_completed_response()
+
+    monkeypatch.setattr(run, "shared_subset", lambda *_args: subset)
+    monkeypatch.setattr(run.client, "chat", fake_chat)
+    result = run_assay(
+        "claude",
+        ANTHROPIC_SPEC,
+        50,
+        1,
+        "assay",
+        {"assay": META},
+        tmp_path / "results",
+        attempt_dir,
+        data_bundle=DATA_BUNDLE,
+        retries=1,
+    )
+
+    assert result["provider"] == "anthropic"
+    assert result["request_descriptor"]["inference_options"]["transport"] == (
+        "anthropic-messages-sse"
+    )
+    assert result["runtime"]["packages"].keys() >= {"anthropic", "httpx2", "pydantic"}
+    assert result["provider_request_id"] == "req_anthropic"
+    assert result["spearman"] == pytest.approx(1.0)
+    assert result["error"] is None
+    assert run._record_succeeded(result) is journal_has_terminal
+    assert (tmp_path / "results" / "assay.json").exists() is journal_has_terminal

@@ -1,0 +1,20 @@
+{
+  "models": {
+    "claude-model": {
+      "display_name": "Claude model",
+      "provider": "anthropic",
+      "api_style": "messages",
+      "model_id": "replace-with-model-id",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "reasoning": "max",
+      "stream": true,
+      "include_thoughts": true,
+      "leaderboard_preset": true,
+      "require_usage": true,
+      "response_model_ids": ["replace-with-provider-returned-model-id"],
+      "probe_max_tokens": 4096,
+      "max_tokens": 128000,
+      "ctx": 1000000
+    }
+  }
+}

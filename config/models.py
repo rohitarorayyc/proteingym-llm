@@ -9,6 +9,8 @@ from pathlib import Path
 N_BATCHES = 3
 PRIMARY_SIZE = 50
 SET_SIZE_REASONING = "high"
+PROVIDERS = ("openai-compatible", "google-vertex", "anthropic")
+ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MODEL_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SENSITIVE_FIELD = re.compile(
@@ -28,6 +30,7 @@ _FIELDS = {
     "base_url_env",
     "credentials_env",
     "project_env",
+    "workspace_env",
     "location",
     "api_version",
     "temperature",
@@ -72,7 +75,13 @@ def _reject_embedded_secrets(name: str, spec: dict, allowed: set[str]) -> None:
                 f"model {name!r} forbids embedded secret/URL field {field!r}; "
                 "reference an environment variable instead"
             )
-        if field in {"api_key_env", "base_url_env", "credentials_env", "project_env"}:
+        if field in {
+            "api_key_env",
+            "base_url_env",
+            "credentials_env",
+            "project_env",
+            "workspace_env",
+        }:
             continue
         if _value_has_embedded_secret(value):
             raise ValueError(
@@ -93,8 +102,10 @@ def validate_model_spec(spec: dict, *, name: str = "request") -> dict:
     if unknown:
         raise ValueError(f"model {name!r} has unknown config fields: {', '.join(unknown)}")
     provider = normalized.get("provider")
-    if provider not in {"openai-compatible", "google-vertex"}:
-        raise ValueError(f"model {name!r} provider must be 'openai-compatible' or 'google-vertex'")
+    if provider not in PROVIDERS:
+        raise ValueError(
+            f"model {name!r} provider must be one of: " + ", ".join(repr(p) for p in PROVIDERS)
+        )
     for field in ("model_id", "reasoning"):
         if not isinstance(normalized.get(field), str) or not normalized[field].strip():
             raise ValueError(f"model {name!r} requires non-empty {field}")
@@ -147,12 +158,56 @@ def validate_model_spec(spec: dict, *, name: str = "request") -> dict:
         raise ValueError(f"model {name!r} output limit must be below its context window")
 
     normalized.setdefault("display_name", name)
-    style = normalized.setdefault(
-        "api_style", "responses" if provider == "openai-compatible" else "generate-content"
-    )
-    if provider == "openai-compatible":
+    default_style = {
+        "openai-compatible": "responses",
+        "google-vertex": "generate-content",
+        "anthropic": "messages",
+    }[provider]
+    style = normalized.setdefault("api_style", default_style)
+    if provider == "anthropic":
+        if style != "messages":
+            raise ValueError(f"model {name!r} anthropic api_style must be 'messages'")
+        forbidden = sorted(
+            field
+            for field in (
+                "credentials_env",
+                "project_env",
+                "location",
+                "api_version",
+                "temperature",
+                "send_reasoning",
+                "send_reasoning_effort",
+                "chat_output_token_field",
+                "service_tier",
+            )
+            if field in normalized
+        )
+        if forbidden:
+            raise ValueError(
+                f"model {name!r} anthropic forbids non-Messages field(s): " + ", ".join(forbidden)
+            )
+        normalized.setdefault("api_key_env", "ANTHROPIC_API_KEY")
+        for field in ("api_key_env", "base_url_env", "workspace_env"):
+            if field in normalized and (
+                not isinstance(normalized[field], str) or not ENV_NAME.fullmatch(normalized[field])
+            ):
+                raise ValueError(f"model {name!r} {field} must be an environment variable name")
+        if normalized["reasoning"] not in ANTHROPIC_EFFORTS:
+            raise ValueError(
+                f"model {name!r} anthropic reasoning must be one of: "
+                + ", ".join(ANTHROPIC_EFFORTS)
+            )
+        # Streaming is the SDK-recommended transport for 128K-token outputs and the
+        # only one that leaves durable per-event evidence in the attempt journal.
+        normalized.setdefault("stream", True)
+        normalized.setdefault("include_thoughts", True)
+        if not isinstance(normalized["include_thoughts"], bool):
+            raise ValueError(f"model {name!r} include_thoughts must be boolean")
+    elif provider == "openai-compatible":
         if style not in {"responses", "chat"}:
             raise ValueError(f"model {name!r} api_style must be 'responses' or 'chat'")
+        if "workspace_env" in normalized:
+            raise ValueError(f"model {name!r} workspace_env is only valid for provider='anthropic'")
         normalized.setdefault("api_key_env", "PGLLM_API_KEY")
         normalized.setdefault("base_url_env", "PGLLM_BASE_URL")
         for field in ("api_key_env", "base_url_env"):
@@ -171,6 +226,7 @@ def validate_model_spec(spec: dict, *, name: str = "request") -> dict:
                 "chat_output_token_field",
                 "stream",
                 "service_tier",
+                "workspace_env",
             )
             if field in normalized
         )
@@ -220,7 +276,7 @@ def validate_model_spec(spec: dict, *, name: str = "request") -> dict:
         or not normalized["service_tier"]
     ):
         raise ValueError(f"model {name!r} service_tier requires a non-empty Responses value")
-    if provider == "google-vertex":
+    if provider in {"google-vertex", "anthropic"}:
         pass
     elif style == "responses":
         if "send_reasoning_effort" in normalized:
@@ -260,7 +316,7 @@ def validate_model_spec(spec: dict, *, name: str = "request") -> dict:
     normalized.setdefault("response_model_ids", [])
     normalized.setdefault("leaderboard_preset", False)
     if (
-        provider == "google-vertex"
+        provider in {"google-vertex", "anthropic"}
         and normalized["require_reasoning"]
         and not normalized["include_thoughts"]
     ):

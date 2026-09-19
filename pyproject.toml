@@ -18,6 +18,7 @@ authors = [
   {name = "George M. Church"},
 ]
 dependencies = [
+  "anthropic>=1.0",
   "certifi>=2024.2",
   "google-auth>=2.40",
   "openai>=2.0",
@@ -28,6 +29,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "build>=1.2",
+  "httpx>=0.27",
   "pytest>=7.4,<8",
   "ruff>=0.6",
 ]
@@ -53,7 +55,11 @@ include = ["config*", "scripts*", "src*"]
 [tool.setuptools.data-files]
 "share/proteingym-llm" = ["DATA.md"]
 "share/proteingym-llm/prompts" = ["prompts/inference_prompt.md"]
-"share/proteingym-llm/examples" = ["examples/model.json", "examples/chat_model.json"]
+"share/proteingym-llm/examples" = [
+  "examples/model.json",
+  "examples/chat_model.json",
+  "examples/anthropic_model.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
